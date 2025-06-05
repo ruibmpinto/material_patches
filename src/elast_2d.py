@@ -42,9 +42,9 @@ from fenicsx_plotly import plot
 
 #%% ----------------------------- Material patch ------------------------------
 
-
 filename = f"/Users/rbarreira/Desktop/machine_learning/material_patches/" + \
-           f"2025_05_15_material_patch_samples/material_patch_0/" + \
+           f"2025_06_05/" + \
+           f"material_patches_generation_2d_quad4/material_patch_0/" + \
            f"material_patch/material_patch_attributes.pkl"
 
 with open(filename, 'rb') as file:
@@ -57,7 +57,7 @@ for node_label, displacements in patch['mesh_boundary_nodes_disps'].items():
     # print(f'Node coords: {node_coords}')
 #%% -------------------------------- Geometry ---------------------------------
 
-domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=4, ny=4, 
+domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=3, ny=3, 
                                cell_type=mesh.CellType.quadrilateral)
 
 
@@ -178,7 +178,7 @@ def identity(x):
 bcs = []
 
 # Function to find DOFs based on coordinates
-def find_dofs_by_coordinates(v_space, coords, tolerance=1e-6):
+def find_dofs_and_displacements(v_space, coords, tolerance=1e-6):
     """
     Finds the global DOFs in function space V_space whose coordinates match
     those in coords_array.
@@ -186,31 +186,68 @@ def find_dofs_by_coordinates(v_space, coords, tolerance=1e-6):
     Returns a list of global DOF indices.
     """
     # FEniCSx 0.9.0 changed the API for locating DOFs!
-    # print(f'v_space.tabulate_dof_coordinates(): {v_space.tabulate_dof_coordinates()}')
+    # print(f'v_space.tabulate_dof_coordinates():
+    # {v_space.tabulate_dof_coordinates()}')
     dof_coords = np.array(v_space.tabulate_dof_coordinates(), dtype=np.float64)
     
     # for idx_node, node_coord in enumerate(dof_coords):
-    #     print(f'Node {idx_node}: coords({node_coord})')
-    #     print(f'coords {idx_node}: coords({coords})')
+    #     print(f'FENICSX:     Node {idx_node}: coords({node_coord})')
+    #     # print(f'coords {idx_node}: coords({coords})')
         
-    dof_indices = []
-    for idx_node, node_coord in enumerate(dof_coords):
-        print(f'Node {idx_node}: coords({node_coord})')
-        print(f'coords {idx_node}: coords({coords})')
-        if np.allclose(node_coord[:gdim], coords, atol=tolerance):
-            # For a vector space V, dof_coords typically has shape
-            # (N_dofs, gdim)
-            # and each row corresponds to a single DOF
-            # (e.g., x-component of a node).
-            # The indices are already global.
-            dof_indices.append(idx_node)
-            break
+    # dof_indices = []
+    # for idx_node, node_coord in enumerate(dof_coords):
+    #     # print(f'Node {idx_node}: coords({node_coord})')
+    #     # print(f'coords {idx_node}: coords({coords})')
+    #     if np.allclose(node_coord[:gdim], coords, atol=tolerance):
+    #         # For a vector space V, dof_coords typically has shape
+    #         # (N_dofs, gdim)
+    #         # and each row corresponds to a single DOF
+    #         # (e.g., x-component of a node).
+    #         # The indices are already global.
+    #         dof_indices.append(idx_node)
+    #         break
+    dofs = fem.locate_dofs_geometrical(V, lambda x: np.logical_and(
+        np.isclose(x[0], coords[0]), np.isclose(x[1], coords[1])) )
 
+    print(f'    FEniCSX mesh DOF: {dofs}, coords: ({dof_coords[dofs]})')
     # Function fem.dirichletBC only accepts numpy arrays
-    dof_indices = np.array(dof_indices)
-    print(f'dof_indices:{dof_indices}')
+    # dof_indices = np.array(dof_indices)
+    # print(f'dof_indices:{dof_indices}')
 
-    return dof_indices
+    return dofs # dof_indices
+
+def apply_displacement_bc(v_space, coords, displacement_values):
+    """
+    Apply displacement boundary condition at given coordinates.
+    """
+    # Find DOFs at the specified coordinates
+    dofs = find_dofs_and_displacements(v_space, coords)
+    
+    if len(dofs) == 0:
+        return None
+    
+    # Create function to hold the displacement values
+    # u_bc = fem.Function(v_space)
+    
+    # For a 2D vector space, we have 2 DOFs per node 
+    # (x and y components)
+    # The DOFs are ordered as:
+    
+    # Apply displacement values to the corresponding DOFs
+    # for idx_dof, dof in enumerate(dofs):
+    #     if idx_dof < len(displacement_values):
+    #         u_bc.x.array[dof] = displacement_values[idx_dof % gdim]
+    # print(f'type of displacement_values: {type(displacement_values)}')
+    print(f'displacement_values: {displacement_values}')
+
+    # print(f'type of dofs: {type(dofs)}')
+    # print(f'dofs: {dofs}')
+
+    # dofs = np.array(dofs, dtype=np.int32)
+
+    # https://jsdokken.com/dolfinx-tutorial/chapter2/linearelasticity_code.html
+    return  fem.dirichletbc(displacement_values, dofs, V)
+
 
 # # mark facets
 # boundaries = [(1, left), (2, right)]
@@ -284,14 +321,25 @@ ksp.setFromOptions()
 #%%  -------------------------------- Solution --------------------------------
 
 # Incremental loading
-num_increments = 1
+num_increments = 5
 
 # Lists to store results for plotting
 u_magnitudes_applied = []
 u_max_values_domain = []
+u_history = []
 # Dictionary to store reaction forces: 
 # {increment_idx: {node_label: [Rx, Ry, Rz]}}
-all_reaction_forces = {}
+forces_internal = {}
+
+
+
+# Create output directory
+output_dir = "output_incremental_disp"
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+
+
 
 # ----------------------------- Timestepping Loop -----------------------------
 print("\n--- Starting Incremental Displacement Loading ---")
@@ -312,34 +360,56 @@ for idx_inc in range(num_increments):
         
         # Retrieve nodal coordinates from dictionary
         # patch['mesh_nodes_coords_ref']
-        node_coords = patch['mesh_nodes_coords_ref'][node_label]
-        
-        print(f'Node label: {node_label}, coords:({node_coords})')
+        node_coords = patch['mesh_nodes_coords_ref'][node_label]  
+        # print(f'    Node label: {node_label}, coords:({node_coords})')
+
+
         # Find node labels in dofs in the FEniCSx FE mesh by the nodal 
         # coordinates from the dictionary patch._mesh_nodes_coords_ref
-        dofs = find_dofs_by_coordinates(V, node_coords)
+        # dofs = find_dofs_by_coordinates(V, node_coords)
 
-        if len(dofs) > 0:
-            # Create a function to represent the displacement 
-            # at this node for this increment
-            # Get the displacement for this increment
-            displacement_value = displacements #[:, idx_inc] 
-            print(f'displacements: {displacements}')
+        disp_array = np.array(displacements, dtype=np.float64)
+        # print(f'disp_array: {disp_array}')
+        displacement_values = disp_array
+        # Time series data
+        # if idx_inc < disp_array.shape[0]:
+        #     # Use correct time value
+        #     displacement_values = disp_array[idx_inc, :]
+        # else:
+        #     # Use last value if beyond range
+        #     displacement_values = disp_array[-1, :]  
 
-            u_dirichlet = fem.Function(V)
-            print(f'np.shape(u_dirichlet.x.array[dofs]): {np.shape(
-                u_dirichlet.x.array[dofs])}')
-            # How to impose (x,y)-displacements at a given node.
-            # Different DOFS?? What is the DOFs order???
-            u_dirichlet.x.array[dofs] = displacement_value
-            
-            bcs.append(fem.dirichletbc(u_dirichlet, dofs))
+        # Apply boundary condition
+        bcs.append(apply_displacement_bc(V, node_coords, displacement_values))
 
-            print(f"   Node {node_label}, displacement = {displacement_value}")
-        else:
-            print(f"   Warning: Node {node_label} not found in FEniCSx mesh.")
-            print(f"   Warning: Node coords {node_coords}.")
+        # if bc is not None:
+        #     bcs.append(bc)
+        #     print(f'   Node {node_label}: ' + \
+        #             f'coords=({node_coords[0]:.3f},{node_coords[1]:.3f}), ' + \
+        #             f'disp=({displacement_values[0]:.6f}, ' + \
+        #             f'{displacement_values[1]:.6f})')
+
+
+    # if len(dofs) > 0:
+    #     # Create a function to represent the displacement 
+    #     # at this node for this increment
+    #     # Get the displacement for this increment
+    #     displacement_value = displacements #[:, idx_inc] 
+    #     print(f'displacements: {displacements}')
+
+    #     u_dirichlet = fem.Function(V)
+    #     print(f'np.shape(u_dirichlet.x.array[dofs]): {np.shape(
+    #         u_dirichlet.x.array[dofs])}')
+    #     # How to impose (x,y)-displacements at a given node.
+    #     # Different DOFS?? What is the DOFs order???
+    #     u_dirichlet.x.array[dofs] = displacement_value
         
+    #     bcs.append(fem.dirichletbc(u_dirichlet, dofs))
+
+    #     print(f"   Node {node_label}, displacement = {displacement_value}")
+    # else:
+    #     print(f"   Warning: Node {node_label} not found in FEniCSx mesh.")
+    #     print(f"   Warning: Node coords {node_coords}.")
 
 
     # Update the problem with the new boundary conditions
@@ -355,35 +425,29 @@ for idx_inc in range(num_increments):
 
         print(f"    Converged in {num_iterations} iterations.")
 
-        # Save solution to XDMF file  
-        # Create a directory if it does not exist
-        output_dir = "output_incremental_disp"
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        # Save solution
+        u.x.scatter_forward() 
 
         with io.XDMFFile(
-            domain.comm, 
-            f"{output_dir}/displacement_increment_{idx_inc+1:03d}.xdmf", 
-            "w") as xdmf:
+            domain.comm,
+            f"{output_dir}/displacement_increment_{idx_inc+1:03d}.xdmf", "w"
+            ) as xdmf:
 
             xdmf.write_mesh(domain)
             xdmf.write_function(u)
 
     except Exception as exc:
-        print(f"An error occurred at increment {idx_inc+1}: {exc}.")
+        print(f'   Error at increment {idx_inc+1}: {exc}.')
         break
 
-print("--- Incremental Displacement Loading Complete ---")
+print('------------- Incremental Displacement Loading Complete --------------')
 
 
 
 #%% ------------------------------- Output file -------------------------------
 out_file = "results/linear_elasticity.xdmf"
 
-U3 = element("Lagrange",  domain.basix_cell(), 1, shape=(3,))
-V3 = fem.functionspace(domain, U3)
-
-u_out = fem.Function(V3, name='u')
+u_out = fem.Function(V, name='u')
 u_out.interpolate(u)
 
 
@@ -394,51 +458,51 @@ with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
 
 #%% ---------------------------- Solver iterations ----------------------------
 
-# set u to zero for case of reexecution
-u.x.petsc_vec.set(0.0)
+# # set u to zero for case of reexecution
+# u.x.petsc_vec.set(0.0)
 
-time_current = 0.0
-time_total = 1.0
-num_steps = 100
-dt = time_total/num_steps
+# time_current = 0.0
+# time_total = 1.0
+# num_steps = 100
+# dt = time_total/num_steps
 
-hist_time = np.zeros(num_steps+1)
-hist_disp = np.zeros(num_steps+1)
-hist_force = np.zeros(num_steps+1)
-hist_mises = np.zeros(num_steps+1)
+# hist_time = np.zeros(num_steps+1)
+# hist_disp = np.zeros(num_steps+1)
+# hist_force = np.zeros(num_steps+1)
+# hist_mises = np.zeros(num_steps+1)
 
-ii = 0
+# ii = 0
 
-while (round(time_current + dt, 9) <= time_total):
-    time_current += dt
-    ii += 1
+# while (round(time_current + dt, 9) <= time_total):
+#     time_current += dt
+#     ii += 1
 
-    disp_bc.value = disp_total*Ramp(time_current,time_total)
+#     disp_bc.value = disp_total*Ramp(time_current,time_total)
     
-    (iter, converged) = solver.solve(u)
-    assert converged
+#     (iter, converged) = solver.solve(u)
+#     assert converged
 
-    # Collect results from MPI ghost processes
-    u.x.scatter_forward()
-    u_out.interpolate(u)
-    sigma_mises.interpolate(sigma_mises_expr)
+#     # Collect results from MPI ghost processes
+#     u.x.scatter_forward()
+#     u_out.interpolate(u)
+#     sigma_mises.interpolate(sigma_mises_expr)
 
-    # Collect history output variables
-    hist_time[ii] = time_current
-    hist_disp[ii] = disp_total*Ramp(time_current,time_total)
-    hist_force[ii] = domain.comm.gather(fem.assemble_scalar(surface_stress))[0]
-    hist_mises[ii] = np.mean(sigma_mises.x.array)
+#     # Collect history output variables
+#     hist_time[ii] = time_current
+#     hist_disp[ii] = disp_total*Ramp(time_current,time_total)
+#     hist_force[ii] = domain.comm.gather(fem.assemble_scalar(surface_stress))[0]
+#     hist_mises[ii] = np.mean(sigma_mises.x.array)
 
-    # Write outputs to file
-    with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
-        xdmf.write_function(u_out, ii)
-        xdmf.write_function(sigma_mises, ii)
+#     # Write outputs to file
+#     with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
+#         xdmf.write_function(u_out, ii)
+#         xdmf.write_function(sigma_mises, ii)
 
-    # update u_old
-    # Update DOFs for next step
-    u_old.x.array[:] = u.x.array
+#     # update u_old
+#     # Update DOFs for next step
+#     u_old.x.array[:] = u.x.array
 
-    print("Time step: ", ii, " | Iterations: ", iter, " | U: ",converged)
+#     print("Time step: ", ii, " | Iterations: ", iter, " | U: ",converged)
 
 #%% ----------------------------- Post-processing -----------------------------
 plt.plot(hist_time, -hist_disp)
