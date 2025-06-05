@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<Xdmf Version="3.0" xmlns:xi="https://www.w3.org/2001/XInclude">
+  <Domain>
+    <Grid Name="mesh" GridType="Uniform">
+      <Topology TopologyType="Hexahedron" NumberOfElements="1000" NodesPerElement="8">
+        <DataItem Dimensions="1000 8" NumberType="Int" Format="HDF">nonlinear_elasticity.h5:/Mesh/mesh/topology</DataItem>
+      </Topology>
+      <Geometry GeometryType="XYZ">
+        <DataItem Dimensions="1331 3" Format="HDF">nonlinear_elasticity.h5:/Mesh/mesh/geometry</DataItem>
+      </Geometry>
+    </Grid>
+    <Grid Name="u" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="u" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="u" AttributeType="Vector" Center="Node">
+          <DataItem Dimensions="1331 3" Format="HDF">nonlinear_elasticity.h5:/Function/u/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="T" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="T" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="T" AttributeType="Tensor" Center="Node">
+          <DataItem Dimensions="1331 9" Format="HDF">nonlinear_elasticity.h5:/Function/T/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+    <Grid Name="mises" GridType="Collection" CollectionType="Temporal">
+      <Grid Name="mises" GridType="Uniform">
+        <xi:include xpointer="xpointer(/Xdmf/Domain/Grid[@GridType='Uniform'][1]/*[self::Topology or self::Geometry])" />
+        <Time Value="0" />
+        <Attribute Name="mises" AttributeType="Scalar" Center="Node">
+          <DataItem Dimensions="1331 1" Format="HDF">nonlinear_elasticity.h5:/Function/mises/0</DataItem>
+        </Attribute>
+      </Grid>
+    </Grid>
+  </Domain>
+</Xdmf>
