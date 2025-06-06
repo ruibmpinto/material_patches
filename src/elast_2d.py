@@ -217,7 +217,7 @@ def compute_reaction_forces(domain, u, V, bcs):
     Compute reaction forces from the assembled system.
     This method assembles the stiffness matrix and computes R = K*u - f
     """
-    
+    # Alternative 1:
     # Create test and trial functions
     u_test = TestFunction(V)
     u_trial = TrialFunction(V)
@@ -245,6 +245,11 @@ def compute_reaction_forces(domain, u, V, bcs):
     A.mult(u.x.petsc_vec, f_int_vec)
     # reaction_vec.axpy(-1.0, b)
 
+    # Alternative 2: from the definition of residual
+    # unconstrained_residual_form = fem.form(residual)
+    # reaction_vector = fem.petsc.create_vector(unconstrained_residual_form)
+    # fem.petsc.assemble_vector(reaction_vector, unconstrained_residual_form)
+    
     return f_int_vec
 
 def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
@@ -257,14 +262,13 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
     # Get reaction vector as numpy array
     reaction_array = reaction_vec.getArray()
 
-    print(f'np.shape(reaction_array): {np.shape(reaction_array)}')
+    # print(f'np.shape(reaction_array): {np.shape(reaction_array)}')
 
-    print(f'reaction_array: {reaction_array}')
+    # print(f'reaction_array: {reaction_array}')
     
     for node_label, coords in boundary_node_coords.items():
         # Find DOFs at this node
         dofs = find_dofs(coords)
-        print(f'dofs: {dofs}')
         # if len(dofs) == 0:
         #     continue
             
@@ -272,12 +276,14 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
         node_reactions = []
         for dof in dofs:
             if dof <= len(reaction_array):
-                # PROBLEM: only appending one DOF!!!
-                node_reactions.append(reaction_array[dof])
+                # x component
+                node_reactions.append(reaction_array[2*dof])
+                # y component
+                node_reactions.append(reaction_array[2*dof+1] )
         
         # For 2D, we expect 2 components (x and y)
         # if len(node_reactions) >= 2:
-        reaction_forces[node_label] = np.array(
+        reaction_forces[dofs[0]] = np.array(
             [node_reactions[0], node_reactions[1]])
         # elif len(node_reactions) == 1:
         #     reaction_forces[node_label] = np.array([node_reactions[0], 0.0])
@@ -295,8 +301,6 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
 
 problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
                            J=derivative(residual, u, u_trial))
-
-
 
 solver = NewtonSolver(MPI.COMM_WORLD, problem)
 solver.convergence_criterion = "incremental"
@@ -318,7 +322,7 @@ ksp.setFromOptions()
 #%%  -------------------------------- Solution --------------------------------
 
 # Incremental loading
-num_increments = 5
+num_increments = 1
 
 # Lists to store results for plotting
 u_magnitudes_applied = []
@@ -393,16 +397,7 @@ for idx_inc in range(num_increments):
 
         # Updates ghost values for parallel computations
         # https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
-        u.x.scatter_forward() 
-
-        # --------------------------- Save solution ---------------------------
-        with io.XDMFFile(
-            domain.comm,
-            f"{output_dir}/displacement_increment_{idx_inc+1:03d}.xdmf", "w"
-            ) as xdmf:
-
-            xdmf.write_mesh(domain)
-            xdmf.write_function(u)
+        # u.x.scatter_forward() 
 
     except Exception as exc:
         print(f'   Error at increment {idx_inc+1}: {exc}.')
@@ -413,12 +408,8 @@ for idx_inc in range(num_increments):
     
     # Compute the reaction forces
     reaction_vec = compute_reaction_forces(domain, u, V, bcs)
-    print(f'reaction_vec: {reaction_vec}')
     nodal_reactions = extract_nodal_reaction_forces(reaction_vec, 
                                                     boundary_node_coords, V)
-    
-    
-    print(f'nodal_reactions: {nodal_reactions}')
     # Store reaction forces for this increment
     forces_internal[idx_inc] = nodal_reactions
     
@@ -431,7 +422,17 @@ for idx_inc in range(num_increments):
     
     # print(f'    Total reaction force: Rx = {total_reaction[0]:.3e}, ' + \
     #       f'Ry = {total_reaction[1]:.3e}')
-    
+
+
+    # --------------------------- Save solution ---------------------------
+        with io.XDMFFile(
+            domain.comm,
+            f"{output_dir}/displacement_increment_{idx_inc+1:03d}.xdmf", "w"
+            ) as xdmf:
+
+            xdmf.write_mesh(domain)
+            xdmf.write_function(u)
+
     # Clean up PETSc vector
     reaction_vec.destroy()
 
@@ -500,8 +501,3 @@ with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
 #     print("Time step: ", ii, " | Iterations: ", iter, " | U: ",converged)
 
 #%% ----------------------------- Post-processing -----------------------------
-plt.plot(hist_time, -hist_disp)
-
-plt.plot(hist_time,hist_force)
-
-plt.plot(hist_time,hist_mises)
