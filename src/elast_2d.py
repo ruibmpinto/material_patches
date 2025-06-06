@@ -103,11 +103,11 @@ u_trial = TrialFunction(V)
 v_test = TestFunction(V)
 
 #%%  -------------------------------- Material --------------------------------
-E = fem.Constant(domain, 70.0e3)
+E = fem.Constant(domain, 1.10e5)
 nu = fem.Constant(domain, 0.33)
 
-lmbda =  E * nu / ((1 + nu) * (1 - 2 * nu))
-mu =  E / (2 * (1 + nu))
+lmbda =  E * nu / ((1. + nu) * (1. - 2. * nu))
+mu =  E / (2. * (1. + nu))
 
 #%% ---------------------------- Constitutive law -----------------------------
 
@@ -121,19 +121,16 @@ def epsilon(u_):
     return ufl.sym(ufl.grad(u_)) 
 
 def sigma(u_):
-    """Stress tensor (Hooke's law for isotropic material) for plane strain"""
-
-    
+    """
+    Stress tensor:
+     
+    Isotropic material in plane strain
+    """
     # return lmbda * ufl.nabla_div(u_) * ufl.Identity(gdim) + \
     #    2 * mu * epsilon(u_)
 
-    print(f'IMPLEMENT PLANE STRAIN!')
     return ufl.tr(epsilon(u_)) * lmbda * ufl.Identity(gdim) + \
        2 * mu * epsilon(u_)
-
-
-
-
 
 #%% ------------------------------- Weak forms --------------------------------
 # Linear functional: body forces (assumed zero)
@@ -177,8 +174,7 @@ def identity(x):
 # List to hold the DirichletBC objects - it will be updated in the loop
 bcs = []
 
-# Function to find DOFs based on coordinates
-def find_dofs_and_displacements(v_space, coords, tolerance=1e-6):
+def find_dofs(coords):
     """
     Finds the global DOFs in function space V_space whose coordinates match
     those in coords_array.
@@ -186,108 +182,109 @@ def find_dofs_and_displacements(v_space, coords, tolerance=1e-6):
     Returns a list of global DOF indices.
     """
     # FEniCSx 0.9.0 changed the API for locating DOFs!
-    # print(f'v_space.tabulate_dof_coordinates():
-    # {v_space.tabulate_dof_coordinates()}')
-    dof_coords = np.array(v_space.tabulate_dof_coordinates(), dtype=np.float64)
+    # dof_coords = np.array(v_space.tabulate_dof_coordinates(),
+    # dtype=np.float64)
     
     # for idx_node, node_coord in enumerate(dof_coords):
     #     print(f'FENICSX:     Node {idx_node}: coords({node_coord})')
     #     # print(f'coords {idx_node}: coords({coords})')
-        
-    # dof_indices = []
-    # for idx_node, node_coord in enumerate(dof_coords):
-    #     # print(f'Node {idx_node}: coords({node_coord})')
-    #     # print(f'coords {idx_node}: coords({coords})')
-    #     if np.allclose(node_coord[:gdim], coords, atol=tolerance):
-    #         # For a vector space V, dof_coords typically has shape
-    #         # (N_dofs, gdim)
-    #         # and each row corresponds to a single DOF
-    #         # (e.g., x-component of a node).
-    #         # The indices are already global.
-    #         dof_indices.append(idx_node)
-    #         break
+
     dofs = fem.locate_dofs_geometrical(V, lambda x: np.logical_and(
         np.isclose(x[0], coords[0]), np.isclose(x[1], coords[1])) )
 
-    print(f'    FEniCSX mesh DOF: {dofs}, coords: ({dof_coords[dofs]})')
-    # Function fem.dirichletBC only accepts numpy arrays
-    # dof_indices = np.array(dof_indices)
-    # print(f'dof_indices:{dof_indices}')
+    # print(f'FEniCSX mesh DOF: {dofs}, coords: ({dof_coords[dofs]})')
 
-    return dofs # dof_indices
+    return dofs
 
 def apply_displacement_bc(v_space, coords, displacement_values):
     """
     Apply displacement boundary condition at given coordinates.
     """
     # Find DOFs at the specified coordinates
-    dofs = find_dofs_and_displacements(v_space, coords)
+    dofs = find_dofs(coords)
     
     if len(dofs) == 0:
         return None
-    
-    # Create function to hold the displacement values
-    # u_bc = fem.Function(v_space)
-    
-    # For a 2D vector space, we have 2 DOFs per node 
-    # (x and y components)
-    # The DOFs are ordered as:
-    
-    # Apply displacement values to the corresponding DOFs
-    # for idx_dof, dof in enumerate(dofs):
-    #     if idx_dof < len(displacement_values):
-    #         u_bc.x.array[dof] = displacement_values[idx_dof % gdim]
-    # print(f'type of displacement_values: {type(displacement_values)}')
-    print(f'displacement_values: {displacement_values}')
 
-    # print(f'type of dofs: {type(dofs)}')
-    # print(f'dofs: {dofs}')
-
-    # dofs = np.array(dofs, dtype=np.int32)
+    print(f'    displacement_values: {displacement_values}')
 
     # https://jsdokken.com/dolfinx-tutorial/chapter2/linearelasticity_code.html
-    return  fem.dirichletbc(displacement_values, dofs, V)
+    return fem.dirichletbc(displacement_values, dofs, v_space)
 
+#%% ----------------------- Internal Forces Computation -----------------------
+def compute_reaction_forces(domain, u, V, bcs):
+    """
+    Compute reaction forces from the assembled system.
+    This method assembles the stiffness matrix and computes R = K*u - f
+    """
+    
+    # Create test and trial functions
+    u_test = TestFunction(V)
+    u_trial = TrialFunction(V)
+    
+    # Bilinear form (stiffness matrix)
+    a = ufl.inner(sigma(u_trial), epsilon(u_test)) * dx
+    
+    # Linear form (load vector - assuming zero body forces)
+    f_body = fem.Constant(domain, np.zeros(gdim))
+    L = ufl.dot(f_body, u_test) * dx
+    
+    # Assemble system
+    A = fem.petsc.assemble_matrix(fem.form(a)) #, bcs=bcs)
+    A.assemble()
+    
+    b = fem.petsc.assemble_vector(fem.form(L))
+    # DO I NEED THIS FOR GLOBAL FORCES??? No, right????
+    # fem.petsc.apply_lifting(b, [fem.form(a)], [bcs])
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
+                  mode=PETSc.ScatterMode.REVERSE)
+    # fem.petsc.set_bc(b, bcs)
+    
+    # Compute reaction forces: f_int = K*u
+    f_int_vec = A.createVecLeft()
+    A.mult(u.x.petsc_vec, f_int_vec)
+    # reaction_vec.axpy(-1.0, b)
 
-# # mark facets
-# boundaries = [(1, left), (2, right)]
+    return f_int_vec
 
-# fdim = gdim - 1
-# facet_indices, facet_markers = [], []
+def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
+    """
+    Extract reaction forces at specific boundary nodes from the global
+      reaction vector.
+    """
+    reaction_forces = {}
+    
+    # Get reaction vector as numpy array
+    reaction_array = reaction_vec.getArray()
 
-# for (marker, locator) in boundaries:
-#     facets = mesh.locate_entities_boundary(domain, fdim, locator)
-#     facet_indices.append(facets)
-#     facet_markers.append(np.full_like(facets, marker))
+    print(f'np.shape(reaction_array): {np.shape(reaction_array)}')
 
-# # Format the facet indices and markers as required for use in dolfinx.
-# facet_indices = np.hstack(facet_indices).astype(np.int32)
-# facet_markers = np.hstack(facet_markers).astype(np.int32)
-# sorted_facets = np.argsort(facet_indices)
-
-# # Add these marked facets as "mesh tags" for later use in BCs.
-# facet_tags = mesh.meshtags(domain, fdim, facet_indices[sorted_facets],
-#                            facet_markers[sorted_facets])
-
-
-# disp_bc = fem.Constant(domain, PETSc.ScalarType(0.0))
-
-# left_dofs_u1 = fem.locate_dofs_topological(V.sub(0), facet_tags.dim,
-#                                            facet_tags.find(1))
-# left_dofs_u2 = fem.locate_dofs_topological(V.sub(1), facet_tags.dim,
-#                                            facet_tags.find(1))
-
-# right_dofs_u1 = fem.locate_dofs_topological(V.sub(0), facet_tags.dim,
-#                                             facet_tags.find(2))
-# right_dofs_u2 = fem.locate_dofs_topological(V.sub(1), facet_tags.dim,
-#                                             facet_tags.find(2))
-
-# bc_0 = fem.dirichletbc(0.0, right_dofs_u1, V.sub(0))
-# # bc_1 = fem.dirichletbc(0.0, right_dofs_u2, V.sub(1))
-# # bc_2 = fem.dirichletbc(0.0, left_dofs_u2, V.sub(1))
-# bc_3 = fem.dirichletbc(disp_bc, left_dofs_u1, V.sub(0))
-
-# bcs = [bc_0, bc_3]
+    print(f'reaction_array: {reaction_array}')
+    
+    for node_label, coords in boundary_node_coords.items():
+        # Find DOFs at this node
+        dofs = find_dofs(coords)
+        print(f'dofs: {dofs}')
+        # if len(dofs) == 0:
+        #     continue
+            
+        # Extract reaction forces at these DOFs
+        node_reactions = []
+        for dof in dofs:
+            if dof <= len(reaction_array):
+                # PROBLEM: only appending one DOF!!!
+                node_reactions.append(reaction_array[dof])
+        
+        # For 2D, we expect 2 components (x and y)
+        # if len(node_reactions) >= 2:
+        reaction_forces[node_label] = np.array(
+            [node_reactions[0], node_reactions[1]])
+        # elif len(node_reactions) == 1:
+        #     reaction_forces[node_label] = np.array([node_reactions[0], 0.0])
+        # else:
+        #     reaction_forces[node_label] = np.array([0.0, 0.0])
+    
+    return reaction_forces
 
 #%% --------------------------------- Solver ----------------------------------
 
@@ -327,24 +324,26 @@ num_increments = 5
 u_magnitudes_applied = []
 u_max_values_domain = []
 u_history = []
-# Dictionary to store reaction forces: 
-# {increment_idx: {node_label: [Rx, Ry, Rz]}}
+# Dictionary to store reaction forces for all time steps: 
+# tructure: {increment_idx: {node_label: [Rx, Ry]}}
 forces_internal = {}
-
-
 
 # Create output directory
 output_dir = "output_incremental_disp"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
+# Boundary node coordinates dictionary for reaction force computation
+boundary_node_coords = {}
+for node_label in patch['mesh_boundary_nodes_disps'].keys():
+    boundary_node_coords[node_label] = patch['mesh_nodes_coords_ref'][
+        node_label]
 
-
-
+print(f'boundary_node_coords: {boundary_node_coords}')
 # ----------------------------- Timestepping Loop -----------------------------
-print("\n--- Starting Incremental Displacement Loading ---")
+print("\n----------------- Incremental displacement loading -----------------")
 for idx_inc in range(num_increments):
-    print(f"Increment {idx_inc + 1}/{num_increments}:")
+    print(f"\n# Increment {idx_inc + 1}/{num_increments}:")
 
     # Clear any previous boundary conditions
     bcs.clear()
@@ -353,8 +352,6 @@ for idx_inc in range(num_increments):
     # Read node labels as keys from dictionary 
     # patch['mesh_boundary_nodes_disps']
 
-    # Does the node numbering match??!!
-    # Can I import the mesh directly into FEniCSx?
     for node_label, displacements in \
         patch['mesh_boundary_nodes_disps'].items():
         
@@ -366,10 +363,8 @@ for idx_inc in range(num_increments):
 
         # Find node labels in dofs in the FEniCSx FE mesh by the nodal 
         # coordinates from the dictionary patch._mesh_nodes_coords_ref
-        # dofs = find_dofs_by_coordinates(V, node_coords)
-
         disp_array = np.array(displacements, dtype=np.float64)
-        # print(f'disp_array: {disp_array}')
+
         displacement_values = disp_array
         # Time series data
         # if idx_inc < disp_array.shape[0]:
@@ -382,52 +377,25 @@ for idx_inc in range(num_increments):
         # Apply boundary condition
         bcs.append(apply_displacement_bc(V, node_coords, displacement_values))
 
-        # if bc is not None:
-        #     bcs.append(bc)
-        #     print(f'   Node {node_label}: ' + \
-        #             f'coords=({node_coords[0]:.3f},{node_coords[1]:.3f}), ' + \
-        #             f'disp=({displacement_values[0]:.6f}, ' + \
-        #             f'{displacement_values[1]:.6f})')
-
-
-    # if len(dofs) > 0:
-    #     # Create a function to represent the displacement 
-    #     # at this node for this increment
-    #     # Get the displacement for this increment
-    #     displacement_value = displacements #[:, idx_inc] 
-    #     print(f'displacements: {displacements}')
-
-    #     u_dirichlet = fem.Function(V)
-    #     print(f'np.shape(u_dirichlet.x.array[dofs]): {np.shape(
-    #         u_dirichlet.x.array[dofs])}')
-    #     # How to impose (x,y)-displacements at a given node.
-    #     # Different DOFS?? What is the DOFs order???
-    #     u_dirichlet.x.array[dofs] = displacement_value
-        
-    #     bcs.append(fem.dirichletbc(u_dirichlet, dofs))
-
-    #     print(f"   Node {node_label}, displacement = {displacement_value}")
-    # else:
-    #     print(f"   Warning: Node {node_label} not found in FEniCSx mesh.")
-    #     print(f"   Warning: Node coords {node_coords}.")
-
-
     # Update the problem with the new boundary conditions
     problem.bcs = bcs
+
 
     # Solve the nonlinear problem
     try:
         num_iterations, converged = solver.solve(u)
         if not converged:
-            print(f"Solver did not converge at increment {idx_inc + 1}. " + \
-                  f"Stopping.")
+            print(f'Solver did not converge at increment {idx_inc + 1}. ' + \
+                  f'Stopping.')
             break
 
-        print(f"    Converged in {num_iterations} iterations.")
+        print(f'    Converged in {num_iterations} iterations.')
 
-        # Save solution
+        # Updates ghost values for parallel computations
+        # https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
         u.x.scatter_forward() 
 
+        # --------------------------- Save solution ---------------------------
         with io.XDMFFile(
             domain.comm,
             f"{output_dir}/displacement_increment_{idx_inc+1:03d}.xdmf", "w"
@@ -440,12 +408,39 @@ for idx_inc in range(num_increments):
         print(f'   Error at increment {idx_inc+1}: {exc}.')
         break
 
-print('------------- Incremental Displacement Loading Complete --------------')
+    # -------------------------- Reaction forces --------------------------
+    print('Computing reaction forces...')
+    
+    # Compute the reaction forces
+    reaction_vec = compute_reaction_forces(domain, u, V, bcs)
+    print(f'reaction_vec: {reaction_vec}')
+    nodal_reactions = extract_nodal_reaction_forces(reaction_vec, 
+                                                    boundary_node_coords, V)
+    
+    
+    print(f'nodal_reactions: {nodal_reactions}')
+    # Store reaction forces for this increment
+    forces_internal[idx_inc] = nodal_reactions
+    
+    # Print reaction forces
+    # total_reaction = np.array([0.0, 0.0])
+    for node_label, reaction in nodal_reactions.items():
+        print(f'    Node {node_label}: Rx = {reaction[0]:.3e}, ' + \
+                f'Ry = {reaction[1]:.3e}')
+        # total_reaction += reaction
+    
+    # print(f'    Total reaction force: Rx = {total_reaction[0]:.3e}, ' + \
+    #       f'Ry = {total_reaction[1]:.3e}')
+    
+    # Clean up PETSc vector
+    reaction_vec.destroy()
+
+print('------------- incremental displacement loading complete --------------')
 
 
 
 #%% ------------------------------- Output file -------------------------------
-out_file = "results/linear_elasticity.xdmf"
+out_file = f"{output_dir}/linear_elasticity.xdmf"
 
 u_out = fem.Function(V, name='u')
 u_out.interpolate(u)
