@@ -60,7 +60,6 @@ for node_label, displacements in patch['mesh_boundary_nodes_disps'].items():
 domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=3, ny=3, 
                                cell_type=mesh.CellType.quadrilateral)
 
-
 # 3D 
 # Topological dimension (3 for a cube)
 tdim = domain.topology.dim 
@@ -163,9 +162,14 @@ def identity(x):
     """
     values = np.zeros((domain.geometry.dim*domain.geometry.dim,
                       x.shape[1]), dtype=np.float64)
-    values[0] = 1
-    values[4] = 1
-    values[8] = 1
+    if gdim == 3:
+        values[0] = 1
+        values[4] = 1
+        values[8] = 1
+    elif gdim == 2:
+        values[0] = 1
+        values[3] = 1
+
     return values
 
 
@@ -189,8 +193,14 @@ def find_dofs(coords):
     #     print(f'FENICSX:     Node {idx_node}: coords({node_coord})')
     #     # print(f'coords {idx_node}: coords({coords})')
 
-    dofs = fem.locate_dofs_geometrical(V, lambda x: np.logical_and(
-        np.isclose(x[0], coords[0]), np.isclose(x[1], coords[1])) )
+    if gdim == 3:
+        dofs = fem.locate_dofs_geometrical(V, lambda x: np.logical_and(
+            np.logical_and(np.isclose(x[0], coords[0]), 
+                           np.isclose(x[1], coords[1])), 
+            np.isclose(x[2], coords[2])))
+    elif gdim == 2:
+        dofs = fem.locate_dofs_geometrical(V, lambda x: np.logical_and(
+            np.isclose(x[0], coords[0]), np.isclose(x[1], coords[1])) )
 
     # print(f'FEniCSX mesh DOF: {dofs}, coords: ({dof_coords[dofs]})')
 
@@ -283,15 +293,28 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
         node_reactions = []
         for dof in dofs:
             if dof <= len(reaction_array):
-                # x component
-                node_reactions.append(reaction_array[2*dof])
-                # y component
-                node_reactions.append(reaction_array[2*dof+1] )
+                if gdim == 3:
+                    # x component
+                    node_reactions.append(reaction_array[3*dof])
+                    # y component
+                    node_reactions.append(reaction_array[3*dof+1] )
+                    # z component
+                    node_reactions.append(reaction_array[3*dof+2] )
+                elif gdim == 2:
+                    # x component
+                    node_reactions.append(reaction_array[2*dof])
+                    # y component
+                    node_reactions.append(reaction_array[2*dof+1] )
+
         
         # For 2D, we expect 2 components (x and y)
         # if len(node_reactions) >= 2:
-        reaction_forces[dofs[0]] = np.array(
-            [node_reactions[0], node_reactions[1]])
+        if gdim == 3:
+            reaction_forces[dofs[0]] = np.array(
+                [node_reactions[0], node_reactions[1], node_reactions[2]])
+        elif gdim == 2:
+            reaction_forces[dofs[0]] = np.array(
+                [node_reactions[0], node_reactions[1]])
         # elif len(node_reactions) == 1:
         #     reaction_forces[node_label] = np.array([node_reactions[0], 0.0])
         # else:
@@ -300,11 +323,6 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
     return reaction_forces
 
 #%% --------------------------------- Solver ----------------------------------
-
-
-# F = grad(u) + Identity(3)
-# J = det(F)
-
 
 problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
                            J=derivative(residual, u, u_trial))
@@ -331,12 +349,10 @@ ksp.setFromOptions()
 # Incremental loading
 num_increments = 1
 
-# Lists to store results for plotting
-u_magnitudes_applied = []
-u_max_values_domain = []
-u_history = []
+# Ensuring u is set to 0.
+u.x.petsc_vec.set(0.0)
 # Dictionary to store reaction forces for all time steps: 
-# tructure: {increment_idx: {node_label: [Rx, Ry]}}
+# structure: {increment_idx: {node_label: [Rx, Ry]}}
 forces_internal = {}
 
 # Create output directory
@@ -404,7 +420,7 @@ for idx_inc in range(num_increments):
 
         # Updates ghost values for parallel computations
         # https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
-        # u.x.scatter_forward() 
+        u.x.scatter_forward() 
 
     except Exception as exc:
         print(f'   Error at increment {idx_inc+1}: {exc}.')
@@ -471,53 +487,3 @@ with io.XDMFFile(domain.comm, out_file, "w") as xdmf:
     xdmf.write_mesh(domain)
 with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
     xdmf.write_function(u_out, 0)
-
-#%% ---------------------------- Solver iterations ----------------------------
-
-# # set u to zero for case of reexecution
-# u.x.petsc_vec.set(0.0)
-
-# time_current = 0.0
-# time_total = 1.0
-# num_steps = 100
-# dt = time_total/num_steps
-
-# hist_time = np.zeros(num_steps+1)
-# hist_disp = np.zeros(num_steps+1)
-# hist_force = np.zeros(num_steps+1)
-# hist_mises = np.zeros(num_steps+1)
-
-# ii = 0
-
-# while (round(time_current + dt, 9) <= time_total):
-#     time_current += dt
-#     ii += 1
-
-#     disp_bc.value = disp_total*Ramp(time_current,time_total)
-    
-#     (iter, converged) = solver.solve(u)
-#     assert converged
-
-#     # Collect results from MPI ghost processes
-#     u.x.scatter_forward()
-#     u_out.interpolate(u)
-#     sigma_mises.interpolate(sigma_mises_expr)
-
-#     # Collect history output variables
-#     hist_time[ii] = time_current
-#     hist_disp[ii] = disp_total*Ramp(time_current,time_total)
-#     hist_force[ii] = domain.comm.gather(fem.assemble_scalar(surface_stress))[0]
-#     hist_mises[ii] = np.mean(sigma_mises.x.array)
-
-#     # Write outputs to file
-#     with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
-#         xdmf.write_function(u_out, ii)
-#         xdmf.write_function(sigma_mises, ii)
-
-#     # update u_old
-#     # Update DOFs for next step
-#     u_old.x.array[:] = u.x.array
-
-#     print("Time step: ", ii, " | Iterations: ", iter, " | U: ",converged)
-
-#%% ----------------------------- Post-processing -----------------------------
