@@ -26,8 +26,10 @@ from petsc4py import PETSc
 
 # specific functions from dolfinx modules
 from dolfinx import fem, mesh, io
-from dolfinx.fem.petsc import NonlinearProblem
+from dolfinx.fem.petsc import NonlinearProblem, LinearProblem
 from dolfinx.nls.petsc import NewtonSolver
+
+import dolfinx.fem.petsc
 
 # basix finite elements (necessary for dolfinx v0.8.0)
 import basix
@@ -72,8 +74,8 @@ print(f'Geometrical dimension: {gdim}')
 # Define the volume integration measure "dx" 
 # also specify the number of volume quadrature points.
 deg_quad = 2
-dx = ufl.Measure('dx', domain=domain, 
-                            metadata={'quadrature_degree': deg_quad,
+dx = ufl.Measure('dx', domain=domain,
+                 metadata={'quadrature_degree': deg_quad,
                            "quadrature_scheme": "default"})
 
 
@@ -140,7 +142,7 @@ l_form = ufl.dot(f_body, v_test) * dx
 # Bilinear functional
 # Residual F(u; v) = inner(sigma(u), epsilon(v))*dx - L(v)
 # Here, 'u' is the fem.Function representing the current solution candidate
-a_form = ufl.inner(sigma(u), epsilon(v_test)) * dx 
+a_form = ufl.inner(sigma(u_trial), epsilon(v_test)) * dx 
 
 
 # Derivative of the residual with respect to u, in the direction of u_trial
@@ -230,33 +232,30 @@ def compute_reaction_forces(domain, u, V, bcs):
     L = ufl.dot(f_body, u_test) * dx
     
     # Assemble system
-    A = fem.petsc.assemble_matrix(fem.form(a))#, bcs=bcs)
+    A = fem.petsc.assemble_matrix(fem.form(a)) #, bcs=bcs)
     A.assemble()
     
-    # print(f'Stiffness matrix A: {A.view()}')
+    print(f'Stiffness Matrix A: {A.view()}')
 
     b = fem.petsc.assemble_vector(fem.form(L))
     # fem.petsc.apply_lifting(b, [fem.form(a)], [bcs])
     b.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
                   mode=PETSc.ScatterMode.REVERSE)
     # fem.petsc.set_bc(b, bcs)
-    print(f'b: {b.getArray()}')
     
     # Compute reaction forces: f_int = K*u
     f_int_vec = A.createVecLeft()
     A.mult(u.x.petsc_vec, f_int_vec)
-    # print(f'f_int_vec_i = A_ij u_j: {f_int_vec.getArray()}')
-    f_int_vec.axpy(-1.0, b)
-    # print(f'f_int_vec_i = A_ij u_j - b_i: {f_int_vec.getArray()}')
+    # f_int_vec.axpy(-1.0, b)
+
     # print(f'f_int_vec: {f_int_vec.getArray()}')
     print(f'displacement vector: {u.x.array}')
 
-    # Alternative 2: from the definition of residual    
+    # Alternative 2: from the definition of residual
     # unconstrained_residual_form = fem.form(residual)
-    # f_int_vec = fem.petsc.create_vector(unconstrained_residual_form)
-    # fem.petsc.assemble_vector(f_int_vec, unconstrained_residual_form)
-    # print(f'f_int_vec: {f_int_vec.getArray()}')
-
+    # reaction_vector = fem.petsc.create_vector(unconstrained_residual_form)
+    # fem.petsc.assemble_vector(reaction_vector, unconstrained_residual_form)
+    
     return f_int_vec
 
 def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
@@ -306,25 +305,25 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
 # J = det(F)
 
 
-problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
-                           J=derivative(residual, u, u_trial))
+# problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
+#                            J=derivative(residual, u, u_trial))
 
-solver = NewtonSolver(MPI.COMM_WORLD, problem)
-solver.convergence_criterion = "incremental"
-solver.rtol = 1e-8
-solver.atol = 1e-8
-solver.max_it = 50
-solver.report = True
+# solver = NewtonSolver(MPI.COMM_WORLD, problem)
+# solver.convergence_criterion = "incremental"
+# solver.rtol = 1e-8
+# solver.atol = 1e-8
+# solver.max_it = 50
+# solver.report = True
 
 #  The Krylov solver parameters.
-ksp = solver.krylov_solver
-opts = PETSc.Options()
-option_prefix = ksp.getOptionsPrefix()
-opts[f"{option_prefix}ksp_type"] = "preonly" 
-opts[f"{option_prefix}pc_type"] = "lu"
-# opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
-# opts[f"{option_prefix}ksp_max_it"] = 30
-ksp.setFromOptions()
+# ksp = solver.krylov_solver
+# opts = PETSc.Options()
+# option_prefix = ksp.getOptionsPrefix()
+# opts[f"{option_prefix}ksp_type"] = "preonly" 
+# opts[f"{option_prefix}pc_type"] = "lu"
+# # opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
+# # opts[f"{option_prefix}ksp_max_it"] = 30
+# ksp.setFromOptions()
 
 #%%  -------------------------------- Solution --------------------------------
 
@@ -389,43 +388,34 @@ for idx_inc in range(num_increments):
         bcs.append(apply_displacement_bc(V, node_coords, displacement_values))
 
     # Update the problem with the new boundary conditions
-    problem.bcs = bcs
+    # problem.bcs = bcs
 
+    problem = LinearProblem(a_form, l_form, u=u, bcs=bcs, 
+                                      petsc_options={"ksp_type": "preonly",
+                                                      "pc_type": "lu"})
+    problem.solve()
 
-    # Solve the nonlinear problem
-    try:
-        num_iterations, converged = solver.solve(u)
-        if not converged:
-            print(f'Solver did not converge at increment {idx_inc + 1}. ' + \
-                  f'Stopping.')
-            break
+    # # Solve the nonlinear problem
+    # try:
+    #     num_iterations, converged = solver.solve(u)
+    #     if not converged:
+    #         print(f'Solver did not converge at increment {idx_inc + 1}. ' + \
+    #               f'Stopping.')
+    #         break
 
-        print(f'    Converged in {num_iterations} iterations.')
+    #     print(f'    Converged in {num_iterations} iterations.')
 
-        # Updates ghost values for parallel computations
-        # https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
-        # u.x.scatter_forward() 
+    #     # Updates ghost values for parallel computations
+    #     # https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
+    #     # u.x.scatter_forward() 
 
-    except Exception as exc:
-        print(f'   Error at increment {idx_inc+1}: {exc}.')
-        break
+    # except Exception as exc:
+    #     print(f'   Error at increment {idx_inc+1}: {exc}.')
+    #     break
 
     # -------------------------- Reaction forces --------------------------
     print('Computing reaction forces...')
-
-    # ABAQUS interior displacements
-    u.x.array[3*2] = 0.0286878
-    u.x.array[3*2 + 1] = 0.0428083
-
-    u.x.array[5*2] = 0.0201981        
-    u.x.array[5*2 + 1] = 0.0237266
-
-    u.x.array[7*2] = 0.0287869
-    u.x.array[7*2 + 1] = 0.0371176
-
-    u.x.array[10*2] = 0.0151731         
-    u.x.array[10*2 + 1] = 0.024637
-
+    
     # Compute the reaction forces
     reaction_vec = compute_reaction_forces(domain, u, V, bcs)
     nodal_reactions = extract_nodal_reaction_forces(reaction_vec, 
