@@ -40,12 +40,31 @@ import pickle as pkl
 
 from fenicsx_plotly import plot
 
-#%% ----------------------------- Material patch ------------------------------
+#%% ------------------------------ User inputs  -------------------------------
+analysis = "2d"
+element_type = 'quad4'
 
-filename = f"/Users/rbarreira/Desktop/machine_learning/material_patches/" + \
-           f"2025_06_05/" + \
-           f"material_patches_generation_2d_quad4/material_patch_0/" + \
-           f"material_patch/material_patch_attributes.pkl"
+#%% ----------------------------- Material patch ------------------------------
+if analysis == "2d":
+    if element_type == 'quad4':
+        filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
+                   f"material_patches/2025_06_05/" + \
+                   f"material_patches_generation_2d_quad4_mesh_3x3/" + \
+                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_attributes.pkl"
+    elif element_type == 'quad8':
+        filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
+                   f"material_patches/2025_06_05/" + \
+                   f"material_patches_generation_2d_quad8_mesh_3x3/" + \
+                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_attributes.pkl"
+elif analysis == "3d":
+    if element_type == 'hex8':
+        filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
+                   f"material_patches/2025_06_05/" + \
+                   f"material_patches_generation_3d_hex8_mesh_3x3/" + \
+                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_attributes.pkl"
 
 with open(filename, 'rb') as file:
     patch = pkl.load(file)
@@ -56,9 +75,12 @@ for node_label, displacements in patch['mesh_boundary_nodes_disps'].items():
     node_coords = patch['mesh_nodes_coords_ref'][node_label]
     # print(f'Node coords: {node_coords}')
 #%% -------------------------------- Geometry ---------------------------------
-
-domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=3, ny=3, 
+if analysis == "2d":
+    domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=3, ny=3, 
                                cell_type=mesh.CellType.quadrilateral)
+elif analysis == "3d":
+    domain = mesh.create_unit_cube(comm=MPI.COMM_WORLD, nx=3, ny=3, nz=3, 
+                               cell_type=mesh.CellType.hexahedron)
 
 # 3D 
 # Topological dimension (3 for a cube)
@@ -96,7 +118,6 @@ V1 = fem.functionspace(domain, tensor_element)
 u = fem.Function(V)
 u.name = "displacement"
 
-# u_old = fem.Function(V)
 
 u_trial = TrialFunction(V)
 v_test = TestFunction(V)
@@ -138,7 +159,7 @@ l_form = ufl.dot(f_body, v_test) * dx
 
 # Bilinear functional
 # Residual F(u; v) = inner(sigma(u), epsilon(v))*dx - L(v)
-# Here, 'u' is the fem.Function representing the current solution candidate
+# 'u' is the fem.Function representing the current solution candidate
 a_form = ufl.inner(sigma(u), epsilon(v_test)) * dx 
 
 
@@ -148,17 +169,17 @@ j_gateaux_der = ufl.derivative(a_form, u, u_trial)
 
 residual = a_form - l_form
 
-# Res = ufl.inner(sigma(u_trial), grad(v_test))*dx
-
 #%% --------------------------- Initial conditions ----------------------------
-
-# A function for constructing the identity matrix.
-#
-# To use the interpolate() feature, this must be defined as a 
-# function of x.
 def identity(x):
     """
-    values: dim 1x9 [1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+    A function for constructing the identity matrix.
+    To use the interpolate() feature, this must be defined as a function of x.
+    
+    In 3D:
+        values: dim 1x9 [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    In 2D:
+        values: dim 1x4 [1, 0, 0, 1]
     """
     values = np.zeros((domain.geometry.dim*domain.geometry.dim,
                       x.shape[1]), dtype=np.float64)
@@ -171,7 +192,6 @@ def identity(x):
         values[3] = 1
 
     return values
-
 
 #%% --------------------------- Boundary Conditions ---------------------------
 
@@ -452,8 +472,12 @@ for idx_inc in range(num_increments):
     # Print reaction forces
     # total_reaction = np.array([0.0, 0.0])
     for node_label, reaction in nodal_reactions.items():
-        print(f'    Node {node_label}: Rx = {reaction[0]:.3e}, ' + \
-                f'Ry = {reaction[1]:.3e}')
+        if gdim == 3:
+            print(f'    Node {node_label}: Rx = {reaction[0]:.3e}, ' + \
+                    f'Ry = {reaction[1]:.3e}, Rz = {reaction[2]:.3e}, ')
+        elif gdim == 2:
+            print(f'    Node {node_label}: Rx = {reaction[0]:.3e}, ' + \
+                    f'Ry = {reaction[1]:.3e}')
         # total_reaction += reaction
     
     # print(f'    Total reaction force: Rx = {total_reaction[0]:.3e}, ' + \

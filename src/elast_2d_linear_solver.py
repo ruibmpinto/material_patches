@@ -149,9 +149,7 @@ a_form = ufl.inner(sigma(u_trial), epsilon(v_test)) * dx
 # J_form = ufl.inner(sigma(u_trial), epsilon(v_test)) * dx
 j_gateaux_der = ufl.derivative(a_form, u, u_trial)
 
-residual = a_form - l_form
-
-# Res = ufl.inner(sigma(u_trial), grad(v_test))*dx
+# residual = a_form - l_form
 
 #%% --------------------------- Initial conditions ----------------------------
 
@@ -267,10 +265,6 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
     
     # Get reaction vector as numpy array
     reaction_array = reaction_vec.getArray()
-
-    # print(f'np.shape(reaction_array): {np.shape(reaction_array)}')
-
-    # print(f'reaction_array: {reaction_array}')
     
     for node_label, coords in boundary_node_coords.items():
         # Find DOFs at this node
@@ -299,11 +293,6 @@ def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
     return reaction_forces
 
 #%% --------------------------------- Solver ----------------------------------
-
-
-# F = grad(u) + Identity(3)
-# J = det(F)
-
 
 # problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
 #                            J=derivative(residual, u, u_trial))
@@ -387,31 +376,12 @@ for idx_inc in range(num_increments):
         # Apply boundary condition
         bcs.append(apply_displacement_bc(V, node_coords, displacement_values))
 
-    # Update the problem with the new boundary conditions
-    # problem.bcs = bcs
-
+    # Solve the problem with the defined boundary conditions
     problem = LinearProblem(a_form, l_form, u=u, bcs=bcs, 
                                       petsc_options={"ksp_type": "preonly",
                                                       "pc_type": "lu"})
     problem.solve()
 
-    # # Solve the nonlinear problem
-    # try:
-    #     num_iterations, converged = solver.solve(u)
-    #     if not converged:
-    #         print(f'Solver did not converge at increment {idx_inc + 1}. ' + \
-    #               f'Stopping.')
-    #         break
-
-    #     print(f'    Converged in {num_iterations} iterations.')
-
-    #     # Updates ghost values for parallel computations
-    #     # https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
-    #     # u.x.scatter_forward() 
-
-    # except Exception as exc:
-    #     print(f'   Error at increment {idx_inc+1}: {exc}.')
-    #     break
 
     # -------------------------- Reaction forces --------------------------
     print('Computing reaction forces...')
@@ -461,53 +431,3 @@ with io.XDMFFile(domain.comm, out_file, "w") as xdmf:
     xdmf.write_mesh(domain)
 with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
     xdmf.write_function(u_out, 0)
-
-#%% ---------------------------- Solver iterations ----------------------------
-
-# # set u to zero for case of reexecution
-# u.x.petsc_vec.set(0.0)
-
-# time_current = 0.0
-# time_total = 1.0
-# num_steps = 100
-# dt = time_total/num_steps
-
-# hist_time = np.zeros(num_steps+1)
-# hist_disp = np.zeros(num_steps+1)
-# hist_force = np.zeros(num_steps+1)
-# hist_mises = np.zeros(num_steps+1)
-
-# ii = 0
-
-# while (round(time_current + dt, 9) <= time_total):
-#     time_current += dt
-#     ii += 1
-
-#     disp_bc.value = disp_total*Ramp(time_current,time_total)
-    
-#     (iter, converged) = solver.solve(u)
-#     assert converged
-
-#     # Collect results from MPI ghost processes
-#     u.x.scatter_forward()
-#     u_out.interpolate(u)
-#     sigma_mises.interpolate(sigma_mises_expr)
-
-#     # Collect history output variables
-#     hist_time[ii] = time_current
-#     hist_disp[ii] = disp_total*Ramp(time_current,time_total)
-#     hist_force[ii] = domain.comm.gather(fem.assemble_scalar(surface_stress))[0]
-#     hist_mises[ii] = np.mean(sigma_mises.x.array)
-
-#     # Write outputs to file
-#     with io.XDMFFile(domain.comm, out_file, "a") as xdmf:
-#         xdmf.write_function(u_out, ii)
-#         xdmf.write_function(sigma_mises, ii)
-
-#     # update u_old
-#     # Update DOFs for next step
-#     u_old.x.array[:] = u.x.array
-
-#     print("Time step: ", ii, " | Iterations: ", iter, " | U: ",converged)
-
-#%% ----------------------------- Post-processing -----------------------------
