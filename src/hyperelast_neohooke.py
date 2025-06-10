@@ -278,7 +278,7 @@ def apply_displacement_bc(v_space, coords, displacement_values):
     print(f'    dofs: {dofs}, displacement_values: {displacement_values}')
 
     # https://jsdokken.com/dolfinx-tutorial/chapter2/linearelasticity_code.html
-    return fem.dirichletbc(displacement_values, dofs, v_space)
+    return fem.dirichletbc(20*displacement_values, dofs, v_space)
 
 #%% ----------------------- Internal Forces Computation -----------------------
 def compute_reaction_forces(domain, u, V, bcs):
@@ -498,7 +498,6 @@ for idx_inc in range(num_increments):
     
     # print(f'    Total reaction force: Rx = {total_reaction[0]:.3e}, ' + \
     #       f'Ry = {total_reaction[1]:.3e}')
-
 
     # --------------------------- Save solution ---------------------------
         with io.XDMFFile(
