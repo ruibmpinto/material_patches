@@ -14,9 +14,24 @@ import numpy as np
 
 # specific functions from ufl modules
 import ufl
-from ufl import TestFunction, TrialFunction, grad, tr, Identity, \
-                inner, derivative, sqrt, dev, le, conditional, inv, det, dot, \
-                nabla_div
+
+from ufl import (
+    sqrt, dev, le, conditional, inv, dot, nabla_div, inner,
+    as_matrix,
+    dot,
+    cos,
+    sin,
+    SpatialCoordinate,
+    Identity,
+    grad,
+    ln,
+    tr,
+    det,
+    variable,
+    derivative,
+    TestFunction,
+    TrialFunction,
+)
 
 # For MPI-based parallelization
 from mpi4py import MPI
@@ -41,8 +56,8 @@ import pickle as pkl
 from fenicsx_plotly import plot
 
 #%% ------------------------------ User inputs  -------------------------------
-analysis = "2d"
-element_type = 'quad8'
+analysis = "3d"
+element_type = 'hex8'
 
 #%% ----------------------------- Material patch ------------------------------
 if analysis == "2d":
@@ -118,16 +133,38 @@ V1 = fem.functionspace(domain, tensor_element)
 u = fem.Function(V)
 u.name = "displacement"
 
-
 u_trial = TrialFunction(V)
 v_test = TestFunction(V)
 
 #%%  -------------------------------- Material --------------------------------
+# Identity tensor
+Id = Identity(gdim)
+
+# Deformation gradient
+F = variable(Id + grad(u))
+
+# Right Cauchy-Green tensor
+C = F.T * F
+
+# Invariants of deformation tensors
+I1 = tr(C)
+J = det(F)
+
+# Elastic constants
 E = fem.Constant(domain, 1.10e5)
 nu = fem.Constant(domain, 0.33)
 
 lmbda =  E * nu / ((1. + nu) * (1. - 2. * nu))
 mu =  E / (2. * (1. + nu))
+
+
+# Stored strain energy density (compressible neo-Hookean model)
+psi = mu / 2 * (I1 - 3 - 2 * ln(J)) + lmbda / 2 * (J - 1) ** 2
+
+# PK1 stress = d_psi/d_F
+pk_1 = ufl.diff(psi, F)
+
+E_pot = psi * dx
 
 #%% ---------------------------- Constitutive law -----------------------------
 
@@ -158,20 +195,19 @@ f_body = fem.Constant(domain, np.zeros(gdim))
 l_form = ufl.dot(f_body, v_test) * dx 
 
 # Bilinear functional
-# Residual F(u; v) = inner(sigma(u), epsilon(v))*dx - L(v)
 # 'u' is the fem.Function representing the current solution candidate
-a_form = ufl.inner(sigma(u), epsilon(v_test)) * dx 
+a_form = ufl.inner(pk_1, grad(v_test)) * dx 
 
 # Residual
 residual = a_form - l_form
+# or equivalently
+residual = derivative(E_pot, u, v_test)  
 
 # Derivative of the residual with respect to u, in the direction of u_trial
-# J_form = ufl.inner(sigma(u_trial), epsilon(v_test)) * dx
 j_gateaux_der = derivative(residual, u, u_trial)
 
-
-
 #%% --------------------------- Initial conditions ----------------------------
+
 def identity(x):
     """
 
@@ -194,6 +230,7 @@ def identity(x):
         values[3] = 1
 
     return values
+
 
 #%% --------------------------- Boundary Conditions ---------------------------
 
@@ -252,42 +289,32 @@ def compute_reaction_forces(domain, u, V, bcs):
     # Alternative 1:
     # Create test and trial functions
     u_test = TestFunction(V)
-    u_trial = TrialFunction(V)
     
     # Bilinear form (stiffness matrix)
-    a = ufl.inner(sigma(u_trial), epsilon(u_test)) * dx
+    a_bilinear_form = inner(pk_1, grad(v_test)) * dx 
     
     # Linear form (load vector - assuming zero body forces)
     f_body = fem.Constant(domain, np.zeros(gdim))
-    L = ufl.dot(f_body, u_test) * dx
+    l_linear_form = dot(f_body, u_test) * dx
     
-    # Assemble system
-    A = fem.petsc.assemble_matrix(fem.form(a))#, bcs=bcs)
-    A.assemble()
-    
-    # print(f'Stiffness matrix A: {A.view()}')
+    residual = a_bilinear_form - l_linear_form
 
-    b = fem.petsc.assemble_vector(fem.form(L))
-    # fem.petsc.apply_lifting(b, [fem.form(a)], [bcs])
-    b.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
-                  mode=PETSc.ScatterMode.REVERSE)
-    # fem.petsc.set_bc(b, bcs)
-    print(f'b: {b.getArray()}')
+    # Assemble the internal force vector
+    f_int_vec = fem.petsc.create_vector(fem.form(residual))
+    fem.petsc.assemble_vector(f_int_vec, fem.form(residual))
     
-    # Compute reaction forces: f_int = K*u
-    f_int_vec = A.createVecLeft()
-    A.mult(u.x.petsc_vec, f_int_vec)
-    # print(f'f_int_vec_i = A_ij u_j: {f_int_vec.getArray()}')
-    f_int_vec.axpy(-1.0, b)
-    # print(f'f_int_vec_i = A_ij u_j - b_i: {f_int_vec.getArray()}')
-    # print(f'f_int_vec: {f_int_vec.getArray()}')
-    print(f'displacement vector: {u.x.array}')
-
-    # Alternative 2: from the definition of residual    
-    # unconstrained_residual_form = fem.form(residual)
-    # f_int_vec = fem.petsc.create_vector(unconstrained_residual_form)
-    # fem.petsc.assemble_vector(f_int_vec, unconstrained_residual_form)
-    # print(f'f_int_vec: {f_int_vec.getArray()}')
+    # Update ghost values for parallel computations
+    f_int_vec.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, 
+                          mode=PETSc.ScatterMode.REVERSE)
+    
+    # # Alternative 2: from the definition of residual    
+    # residual_form = fem.form(residual)
+    # f_int_vec = fem.petsc.create_vector(fem.form(residual_form))
+    # # Assemble the residual vector
+    # fem.petsc.assemble_vector(f_int_vec, fem.form(residual_form))
+    # f_int_vec.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, 
+    #                       mode=PETSc.ScatterMode.REVERSE)
+    # # print(f'f_int_vec: {f_int_vec.getArray()}')
 
     return f_int_vec
 
@@ -351,20 +378,20 @@ problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
 
 solver = NewtonSolver(MPI.COMM_WORLD, problem)
 solver.convergence_criterion = "incremental"
-solver.rtol = 1e-8
-solver.atol = 1e-8
+solver.rtol = 1e-4
+solver.atol = 1e-4
 solver.max_it = 50
 solver.report = True
 
 #  The Krylov solver parameters.
-ksp = solver.krylov_solver
-opts = PETSc.Options()
-option_prefix = ksp.getOptionsPrefix()
-opts[f"{option_prefix}ksp_type"] = "preonly" 
-opts[f"{option_prefix}pc_type"] = "lu"
-# opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
-# opts[f"{option_prefix}ksp_max_it"] = 30
-ksp.setFromOptions()
+# ksp = solver.krylov_solver
+# opts = PETSc.Options()
+# option_prefix = ksp.getOptionsPrefix()
+# opts[f"{option_prefix}ksp_type"] = "preonly" 
+# opts[f"{option_prefix}pc_type"] = "lu"
+# # opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
+# # opts[f"{option_prefix}ksp_max_it"] = 30
+# ksp.setFromOptions()
 
 #%%  -------------------------------- Solution --------------------------------
 
@@ -450,19 +477,6 @@ for idx_inc in range(num_increments):
 
     # -------------------------- Reaction forces --------------------------
     print('Computing reaction forces...')
-
-    # ABAQUS interior displacements
-    u.x.array[3*2] = 0.0286878
-    u.x.array[3*2 + 1] = 0.0428083
-
-    u.x.array[5*2] = 0.0201981        
-    u.x.array[5*2 + 1] = 0.0237266
-
-    u.x.array[7*2] = 0.0287869
-    u.x.array[7*2 + 1] = 0.0371176
-
-    u.x.array[10*2] = 0.0151731         
-    u.x.array[10*2 + 1] = 0.024637
 
     # Compute the reaction forces
     reaction_vec = compute_reaction_forces(domain, u, V, bcs)
