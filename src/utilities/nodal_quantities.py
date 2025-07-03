@@ -75,15 +75,14 @@ def apply_displacement_bc(v_space, gdim, coords, displacement_values):
     if len(nodes) == 0:
         return None
 
-    print(f'    nodes: {nodes}, displacement_values: {displacement_values}')
+    # print(f'    nodes: {nodes}, displacement_values: {displacement_values}')
 
     return fem.dirichletbc(displacement_values, nodes, v_space)
 
 
-def extract_nodal_forces(forces_internal, boundary_node_coords, gdim, V):
+def extract_forces_at_nodes(forces_internal, node_coords, gdim, V):
     """
-    Extract forces at specific boundary nodes from the global
-      force vector.
+    Extract forces at specific nodes from the global force vector.
     """
     forces_dict = {}
     
@@ -94,7 +93,7 @@ def extract_nodal_forces(forces_internal, boundary_node_coords, gdim, V):
 
     # print(f'reaction_array: {reaction_array}')
     
-    for node_label, coords in boundary_node_coords.items():
+    for node_label, coords in node_coords.items():
         # Find node_idx at these coordinates
         nodes = find_nodes(coords, gdim=gdim, V=V)
         
@@ -129,9 +128,9 @@ def extract_nodal_forces(forces_internal, boundary_node_coords, gdim, V):
 
     return forces_dict
 
-def extract_boundary_displacements(u, boundary_nodes, V, gdim):
+def extract_disps_at_nodes(u, nodes, V, gdim):
     """
-    Extract displacement values for boundary nodes
+    Extract displacement values for nodes
     
     Parameters:
     - u: displacement solution function
@@ -144,13 +143,10 @@ def extract_boundary_displacements(u, boundary_nodes, V, gdim):
     """
     boundary_displacements = {}
     
-    # Get all DOF coordinates
-    dof_coords = V.tabulate_dof_coordinates()
-    
     # Extract displacement values at boundary nodes
     u_values = u.x.array
     
-    for node_idx in boundary_nodes:
+    for node_idx in nodes:
         if gdim == 2:
             # For 2D: extract x and y displacements
             disp = np.array([u_values[node_idx * gdim],

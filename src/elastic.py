@@ -33,9 +33,8 @@ Node ordering:
 #                                                                      Modules
 #%% ===========================================================================
 import os
+import sys
 
-# Import FEnicSx/dolfinx
-import dolfinx
 import numpy as np
 import matplotlib.pyplot as plt
 import pickle as pkl
@@ -65,7 +64,7 @@ from basix.ufl import element
 from fenicsx_plotly import plot
 
 from utilities.nodal_quantities import apply_displacement_bc, \
-    extract_nodal_forces, find_boundary_nodes, extract_boundary_displacements
+    extract_forces_at_nodes, find_boundary_nodes, extract_disps_at_nodes
 
 from utilities.force_integration import compute_forces_residual, \
     compute_forces_stress_integration, validate_stress_integration_methods
@@ -79,58 +78,70 @@ __status__ = 'development'
 # =============================================================================
 #
 #%% ------------------------------ User inputs  -------------------------------
-analysis = "2d"
+analysis_dim = "2d"
 element_type = 'quad4'
 material_behavior = 'elastic'
+patch_idx = int (sys.argv[1])
 
 num_increments = 1
 
+mesh_nx = 3
+mesh_ny = 3 
+mesh_nz = 3
+
 #%% ----------------------------- Material patch ------------------------------
-if analysis == "2d":
+dir_path = f'_data/{material_behavior}_ninc{num_increments}'
+os.makedirs(dir_path, exist_ok=True)
+if analysis_dim == "2d":
     if element_type == 'quad4':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
                    f"material_patches/2025_06_05/" + \
                    f"material_patches_generation_2d_quad4_mesh_3x3/" + \
-                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_{patch_idx}/material_patch/" + \
                    f"material_patch_attributes.pkl"
         elem_order = 1
     elif element_type == 'quad8':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
                    f"material_patches/2025_06_05/" + \
                    f"material_patches_generation_2d_quad8_mesh_3x3/" + \
-                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_{patch_idx}/material_patch/" + \
                    f"material_patch_attributes.pkl"
         elem_order = 2
-elif analysis == "3d":
+    
+    output_filename = dir_path + f'/matpatch_{analysis_dim}_' + \
+        f'mesh{mesh_nx}x{mesh_ny}_{element_type}_idx{patch_idx}.pkl'
+    
+elif analysis_dim == "3d":
     if element_type == 'hex8':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
                    f"material_patches/2025_06_05/" + \
                    f"material_patches_generation_3d_hex8_mesh_3x3/" + \
-                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_{patch_idx}/material_patch/" + \
                    f"material_patch_attributes.pkl"
         elem_order = 1
     elif element_type == 'hex20':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
                    f"material_patches/2025_06_05/" + \
                    f"material_patches_generation_3d_hex20_mesh_3x3/" + \
-                   f"material_patch_0/material_patch/" + \
+                   f"material_patch_{patch_idx}/material_patch/" + \
                    f"material_patch_attributes.pkl"
         elem_order = 2
 
-        # MAYBE CHECK:
-        # topological
-        # https://docs.fenicsproject.org/dolfinx/main/python/generated/dolfinx.fem.html#dolfinx.fem.locate_dofs_topological
+    output_filename = dir_path + f'/matpatch_{analysis_dim}_' + \
+        f'mesh{mesh_nx}x{mesh_ny}x{mesh_nz}_{element_type}_idx{patch_idx}.pkl'
 
 with open(filename, 'rb') as file:
     patch = pkl.load(file)
 
 #%% ----------------------------- Geometry & mesh -----------------------------
-if analysis == "2d":
-    domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=3, ny=3, 
+if analysis_dim == "2d":
+    domain = mesh.create_unit_square(comm=MPI.COMM_WORLD, nx=mesh_nx, 
+                                     ny=mesh_ny, 
                                cell_type=mesh.CellType.quadrilateral)
     domain.topology.create_connectivity(1, 2) 
-elif analysis == "3d":
-    domain = mesh.create_unit_cube(comm=MPI.COMM_WORLD, nx=3, ny=3, nz=3, 
+elif analysis_dim == "3d":
+    domain = mesh.create_unit_cube(comm=MPI.COMM_WORLD, nx=mesh_nx, ny=mesh_ny, 
+                                   nz=mesh_nz, 
                                cell_type=mesh.CellType.hexahedron)
     domain.topology.create_connectivity(2, 3) 
 
@@ -259,8 +270,6 @@ j_gateaux_der = derivative(residual, u, u_trial)
 
 #%% --------------------------- Boundary Conditions ---------------------------
 
-
-
 num_bd_nodes_mat_patch = len(patch['mesh_boundary_nodes_disps'].items())
 
 # List to hold the DirichletBC objects - it will be updated in the loop
@@ -279,15 +288,15 @@ for node in boundary_nodes:
     if gdim == 2:
         bd_node_coords_fe_space[node] = [node_coords_fe_space[node, 0],
                                          node_coords_fe_space[node, 1]]
-        print(f'Node {node}: ({node_coords_fe_space[node, 0]:.6f}, ' + \
-              f'{node_coords_fe_space[node, 1]:.6f})')
+        # print(f'Node {node}: ({node_coords_fe_space[node, 0]:.6f}, ' + \
+        #       f'{node_coords_fe_space[node, 1]:.6f})')
     elif gdim == 3:
         bd_node_coords_fe_space[node] = [node_coords_fe_space[node, 0],
                                          node_coords_fe_space[node, 1],
                                          node_coords_fe_space[node, 2]]
-        print(f'Node {node}: ({node_coords_fe_space[node, 0]:.6f}, ' + \
-              f'{node_coords_fe_space[node, 1]:.6f}, '
-              f'{node_coords_fe_space[node, 2]:.6f})')
+        # print(f'Node {node}: ({node_coords_fe_space[node, 0]:.6f}, ' + \
+        #       f'{node_coords_fe_space[node, 1]:.6f}, '
+        #       f'{node_coords_fe_space[node, 2]:.6f})')
 
 # Boundary node coordinates read from material patch
 bd_node_coords_matpatch = {}
@@ -301,6 +310,12 @@ for node_label in patch['mesh_boundary_nodes_disps'].keys():
 # # Find boundary DOFs
 # boundary_dofs = fem.locate_dofs_topological(V, entity_dim=tdim-1,
 #                                             entities=boundary_facets)
+
+
+
+# MAYBE CHECK:
+# topological
+# https://docs.fenicsproject.org/dolfinx/main/python/generated/dolfinx.fem.html#dolfinx.fem.locate_dofs_topological
 
 # print(boundary_dofs)
 
@@ -381,13 +396,10 @@ if not os.path.exists(output_dir):
 # ----------------------------- Timestepping Loop -----------------------------
 print("\n----------------- Incremental displacement loading -----------------")
 for idx_inc in range(num_increments):
-    print(f"\n# Increment {idx_inc + 1}/{num_increments}:")
+    print(f"# Increment {idx_inc + 1}/{num_increments}:")
 
     # Clear any previous boundary conditions
     bcs.clear()
-
-    # Apply boundary conditions based on patch data for this increment
-    current_increment_disps = {}
 
     # Apply boundary conditions based on patch data for this increment
     # Read node labels as keys from dictionary 
@@ -415,7 +427,6 @@ for idx_inc in range(num_increments):
         
     # Update the problem with the new boundary conditions
     problem.bcs = bcs
-    print(bcs)
 
     # Solve the nonlinear problem
     try:
@@ -426,18 +437,31 @@ for idx_inc in range(num_increments):
             break
 
         print(f'    Converged in {num_iterations} iterations.')
+        
 
         # Updates ghost values for parallel computations
         u.x.scatter_forward() 
 
-        # Store current displacement values
-        boundary_displacements = extract_boundary_displacements(
-            u, boundary_nodes, V, gdim)
+        # Extract displacement values at the boundary
+        bd_node_disps = extract_disps_at_nodes(
+            u, nodes=boundary_nodes, gdim=gdim, V=V)
         
-        for node_label, disp in boundary_displacements.items():
+        print('\nDisplacements:\n')
+        # Store current displacement values
+        for node_label, disp in bd_node_disps.items():
+            if gdim == 3:
+                print(f'    Node {node_label}: u = ({disp[0]:.3e}, ' + \
+                        f'{disp[1]:.3e}, {disp[2]:.3e}) ')
+            elif gdim == 2:
+                print(f'    Node {node_label}: u = ({disp[0]:.3e}, ' + \
+                      f'{disp[1]:.3e})')
+        
+            if node_label not in simulation_data[
+            'boundary_nodes_disps_time_series']:
+                simulation_data['boundary_nodes_disps_time_series'][
+                    node_label] = []  
             simulation_data['boundary_nodes_disps_time_series'][
                 node_label].append(disp.tolist())
-
 
     except Exception as exc:
         print(f'   Error at increment {idx_inc+1}: {exc}.')
@@ -445,7 +469,7 @@ for idx_inc in range(num_increments):
     
     
     # ---------------------------- Internal forces ----------------------------
-    print('Computing internal forces...')
+    print('\nInternal forces:\n')
 
     # ABAQUS interior displacements
     # u.x.array[3*2] = 0.0286878
@@ -480,11 +504,22 @@ for idx_inc in range(num_increments):
     #     print(f"Stress integration validation: FAILED")
 
     # Extract internal forces at the boundary nodes
-    nodal_forces = extract_nodal_forces(force_vec, bd_node_coords_fe_space,
-                                         gdim, V)
+    bd_node_forces = extract_forces_at_nodes(
+        force_vec, bd_node_coords_fe_space, gdim=gdim, V=V)
 
     # Store force data  
-    for node_label, force in nodal_forces.items():                    
+    for node_label, force in bd_node_forces.items():
+        if gdim == 3:
+            print(f'    Node {node_label}: Rx = {force[0]:.3e}, ' + \
+                    f'Ry = {force[1]:.3e}, Rz = {force[2]:.3e}, ')
+        elif gdim == 2:
+            print(f'    Node {node_label}: Rx = {force[0]:.3e}, ' + \
+                    f'Ry = {force[1]:.3e}')
+            
+        if node_label not in simulation_data[
+            'boundary_nodes_forces_time_series']:
+            simulation_data['boundary_nodes_forces_time_series'][
+                node_label] = []          
         simulation_data['boundary_nodes_forces_time_series'][
             node_label].append(force.tolist())
 
@@ -500,7 +535,7 @@ for idx_inc in range(num_increments):
     # Clean up PETSc vector
     force_vec.destroy()
 
-print('------------- incremental displacement loading complete --------------')
+print('------------ incremental displacement loading complete -------------\n')
 
 #%% ------------------------------- Output file -------------------------------
 # out_file = f"{output_dir}/linear_elasticity.xdmf"
@@ -515,13 +550,13 @@ print('------------- incremental displacement loading complete --------------')
 
 #%% ------------------------------- Save Data -------------------------------
 
-# Convert forces time series lists to NumPy arrays
+# Convert forces time series lists to numpy arrays
 for node_label, forces_list in simulation_data[
     'boundary_nodes_forces_time_series'].items():
     simulation_data['boundary_nodes_forces_time_series'][
         node_label] = np.array(forces_list)
 
-# Convert displacements time series lists to NumPy arrays
+# Convert displacements time series lists to numpy arrays
 for node_label, disps_list in simulation_data[
     'boundary_nodes_disps_time_series'].items():
     simulation_data['boundary_nodes_disps_time_series'][
@@ -529,11 +564,8 @@ for node_label, disps_list in simulation_data[
 
 
 # Save the complete simulation data to a pickle file
-output_filename = f"material_patch_sim_data_{analysis}_{element_type}.pkl"
-
 try:
     with open(output_filename, 'wb') as f:
         pkl.dump(simulation_data, f, protocol=pkl.HIGHEST_PROTOCOL)
-
 except Exception as excp:
     print(f"Error saving simulation data: {excp}")
