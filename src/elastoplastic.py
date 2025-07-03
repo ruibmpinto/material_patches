@@ -1,15 +1,24 @@
-""" 
+"""
 
-References & tutorials:
+Elastoplasticity tutorials:
 
-Hyperelasticity:
-- https://bleyerj.github.io/comet-fenicsx/intro/hyperelasticity/hyperelasticity.html
-- https://jsdokken.com/dolfinx-tutorial/chapter2/hyperelasticity.html
-- https://newfrac.gitlab.io/newfrac-fenicsx-training/02-finite-elasticity/finite-elasticity-I.html
+- https://newfrac.github.io/fenicsx-fracture/notebooks/plasticity/plasticity.html
+- https://bleyerj.github.io/comet-fenicsx/tours/nonlinear_problems/plasticity/plasticity.html
+- https://github.com/bessagroup/CRATE/blob/master/src/cratepy/material/models/von_mises.py
+- https://github.com/BAMresearch/fenics-constitutive/blob/main/src/fenics_constitutive/models/mises_plasticity_isotropic_hardening.py
+- https://github.com/iarlopes/ViewReturnMapping/blob/master/yield_function.py
+- https://comet-fenics.readthedocs.io/en/latest/demo/plasticity_mfront/plasticity_mfront.py.html#plasticitymfront
+- https://comet-fenics.readthedocs.io/en/latest/demo/2D_plasticity/vonMises_plasticity.py.html
+- https://getfem.org/userdoc/model_plasticity_small_strain.html
+
+Dirichlet BCs:
+
+- https://jsdokken.com/dolfinx-tutorial/chapter3/multiple_dirichlet.html
 
 Compatbility issues between v0.8.0 and v0.9.0
 - https://fenicsproject.discourse.group/t/how-did-the-function-object-change-in-dolfinx-v0-9-0/16085
 - https://github.com/FEniCS/web/pull/192/files
+
 """
 
 #                                                                      Modules
@@ -24,24 +33,9 @@ import numpy as np
 
 # specific functions from ufl modules
 import ufl
-
-from ufl import (
-    sqrt, dev, le, conditional, inv, dot, nabla_div, inner,
-    as_matrix,
-    dot,
-    cos,
-    sin,
-    SpatialCoordinate,
-    Identity,
-    grad,
-    ln,
-    tr,
-    det,
-    variable,
-    derivative,
-    TestFunction,
-    TrialFunction,
-)
+from ufl import TestFunction, TrialFunction, grad, tr, Identity, \
+                inner, derivative, sqrt, dev, le, conditional, inv, det, dot, \
+                nabla_div
 
 # For MPI-based parallelization
 from mpi4py import MPI
@@ -64,6 +58,10 @@ import matplotlib.pyplot as plt
 import pickle as pkl
 
 from fenicsx_plotly import plot
+
+from fenics_constitutive import IncrSmallStrainProblem
+
+#
 #                                                          Authorship & Credits
 # =============================================================================
 __author__ = 'Rui Barreira Morais Pinto (rbarreira@ethz.ch, ' \
@@ -74,8 +72,8 @@ __status__ = 'development'
 #
 
 #%% ------------------------------ User inputs  -------------------------------
-analysis = "3d"
-element_type = 'hex8'
+analysis = "2d"
+element_type = 'quad4'
 
 #%% ----------------------------- Material patch ------------------------------
 if analysis == "2d":
@@ -85,14 +83,12 @@ if analysis == "2d":
                    f"material_patches_generation_2d_quad4_mesh_3x3/" + \
                    f"material_patch_0/material_patch/" + \
                    f"material_patch_attributes.pkl"
-        elem_order = 1
     elif element_type == 'quad8':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
                    f"material_patches/2025_06_05/" + \
                    f"material_patches_generation_2d_quad8_mesh_3x3/" + \
                    f"material_patch_0/material_patch/" + \
                    f"material_patch_attributes.pkl"
-        elem_order = 2
 elif analysis == "3d":
     if element_type == 'hex8':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
@@ -100,7 +96,6 @@ elif analysis == "3d":
                    f"material_patches_generation_3d_hex8_mesh_3x3/" + \
                    f"material_patch_0/material_patch/" + \
                    f"material_patch_attributes.pkl"
-        elem_order = 1
     elif element_type == 'hex20':
         filename = f"/Users/rbarreira/Desktop/machine_learning/" + \
                    f"material_patches/2025_06_05/" + \
@@ -149,54 +144,228 @@ ds = ufl.Measure('ds', domain=domain)
 #%% ----------------------------- Function spaces -----------------------------
 
 # vector elements and function space
-vector_element = element(family="Lagrange", cell=domain.basix_cell(), 
-                         degree=elem_order, shape=(gdim,))
+vector_element = element(family="Lagrange", cell=domain.basix_cell(), degree=1,
+                         shape=(gdim,))
 V = fem.functionspace(domain, vector_element)
 
 # tensor function space 
-tensor_element = element(family="Lagrange", cell=domain.basix_cell(), 
-                         degree=elem_order, shape=(gdim,gdim)) 
+tensor_element = element(family="Lagrange", cell=domain.basix_cell(), degree=1,
+                          shape=(gdim,gdim)) 
 V1 = fem.functionspace(domain, tensor_element)
 
 u = fem.Function(V)
 u.name = "displacement"
 
+u_old = fem.Function(V, name="displacement_old")
+
 u_trial = TrialFunction(V)
 v_test = TestFunction(V)
 
-#%%  -------------------------------- Material --------------------------------
+# Tensor function space: stress and plastic strain
+tensor_element = element(family="Lagrange", cell=domain.basix_cell(), degree=1,
+                         shape=(gdim,gdim)) 
+V_tensor = fem.functionspace(domain, tensor_element)
 
-# Elastic constants
+# Scalar function space for equivalent plastic strain
+scalar_element = element(family="Lagrange", cell=domain.basix_cell(), degree=1)
+V_scalar = fem.functionspace(domain, scalar_element)
+
+# Plastic strain tensor
+eps_p = fem.Function(V_tensor, name="plastic_strain")
+eps_p_old = fem.Function(V_tensor, name="plastic_strain_old")
+
+# Equivalent plastic strain for hardening
+alpha = fem.Function(V_scalar, name="equivalent_plastic_strain")
+alpha_old = fem.Function(V_scalar, name="equivalent_plastic_strain_old")
+
+#%%  -------------------------------- Material --------------------------------
 E = fem.Constant(domain, 1.10e5)
 nu = fem.Constant(domain, 0.33)
 
 lmbda =  E * nu / ((1. + nu) * (1. - 2. * nu))
 mu =  E / (2. * (1. + nu))
 
+# Isotropic nonlinear hardening
+# yield strength in MPa
+sigma_y0 = fem.Constant(domain, 250.0)
+# hardening exponent
+n_hard = fem.Constant(domain, 0.5)
+# Hardening modulus [MPa]
+H = fem.Constant(domain, 1000.0)   
+
+# only for linear hardening
+# # tangent modulus
+# Et = E / 100.0  
+# # hardening modulus
+# H = E * Et / (E - Et)  
+
 #%% ---------------------------- Constitutive law -----------------------------
-# Identity tensor
-Id = Identity(gdim)
 
-# Deformation gradient
-F = variable(Id + grad(u))
+# strain and stress
+# def epsilon(u_):
+#     """
+#     Strain tensor:
+    
+#     Equivalent to 0.5*(ufl.nabla_grad(u) + ufl.nabla_grad(u).T)
+#     """
+#     e = ufl.sym(ufl.grad(u_)) 
+#     if gdim == 2:
+#         return ufl.as_tensor([[e[0, 0], e[0, 1], 0],
+#                               [e[0, 1], e[1, 1], 0],
+#                               [0, 0, 0]])
+#     elif gdim == 3:
+#         return ufl.as_tensor([[e[0, 0], e[0, 1], [0, 2]],
+#                               [e[0, 1], e[1, 1], [1, 2]],
+#                               [e[0, 2], e[1, 2], e[2, 2]]])
+def epsilon(u_):
+    """
+    Strain tensor
+    """
+    return ufl.sym(ufl.grad(u_)) 
 
-# Right Cauchy-Green tensor
-C = F.T * F
+# def sigma_tr(eps_el):
+#     return 1./3. * (3. * lmbda + 2. * mu) * ufl.tr(eps_el) * ufl.Identity(3)
 
-# Invariants of deformation tensors
-I1 = tr(C)
-J = det(F)
+# def sigma_dev(eps_el):
+#     return 2. * mu * ufl.dev(eps_el)
 
-# Stored strain energy density (compressible neo-Hookean model)
-psi = mu / 2 * (I1 - 3 - 2 * ln(J)) + lmbda / 2 * (J - 1) ** 2
+def sigma_elastic(eps_el):
+    """
+    Elastic stress tensor
+    """
+    return lmbda * ufl.tr(eps_el) * ufl.Identity(3) + 2 * mu * eps_el
 
-# PK1 stress = d_psi/d_F
-pk_1 = ufl.diff(psi, F)
-# in linear elasticity: 
-# pk_1 = 2.0 * mu * ufl.sym(ufl.grad(u)) + \
-#     lmbda * ufl.tr(ufl.sym(ufl.grad(u))) * I
+def von_mises_stress(sig):
+    """ 
+    Von Mises equivalent stress.
+    """
+    s_ = ufl.dev(sig)
 
-E_pot = psi * dx
+    return ufl.sqrt(3. / 2. * ufl.inner(s_, s_))
+
+def yield_function(sigma_, alpha_):
+    """
+    Von Mises yield function with nonlinear hardening.
+    """
+    sigma_vm = von_mises_stress(sigma_)
+    sigma_y = sigma_y0 + H * (alpha_)**n_hard
+    
+    return sigma_vm - sigma_y
+
+def plastic_flow_direction(sigma_):
+    """
+    Plastic flow direction (associated flow rule)
+    """
+    # Deviatoric stress
+    s_dev = dev(sigma_)  
+    sigma_vm = von_mises_stress(sigma_)
+    # Avoid division by zero
+    return conditional(sigma_vm > 1e-12, 
+                       3.0/2.0 * s_dev / sigma_vm, 0.0 * s_dev)
+
+def sigma(u_, eps_p_old_, alpha_old_):
+    """
+    Stress tensor with plasticity.
+    ´"""
+    eps_total = epsilon(u_)
+    sigma_new, _, _ = return_mapping(eps_total, eps_p_old_, alpha_old_)
+    return sigma_new
+
+def return_mapping(eps_trial, eps_pl_old_, alpha_old_):
+    """
+    Return mapping algorithm for von Mises plasticity
+    This is a simplified UFL implementation
+    """
+    # Trial elastic strain
+    eps_el_trial = eps_trial - eps_pl_old_
+    
+    # Trial stress
+    sigma_trial = sigma_elastic(eps_el_trial)
+    
+    # Check yield condition
+    f_trial = yield_function(sigma_trial, alpha_old_)
+    
+    # If the trial stress state lies inside the von Mises yield function,
+    # then the state update is purely elastic and coincident with the
+    # elastic trial state. Otherwise, the state update is elastoplastic
+    # and the return-mapping system of nonlinear equations must be solved
+    # in order to update the state variables
+    is_plastic = conditional(f_trial > 0, True, False)
+    
+    if not is_plastic:
+            # Elastic step
+            # Update elastic strain
+            eps_el_new = e_trial_strain_mf
+            # Update stress
+            sigma_new = sigma_elastic(eps_el_new)
+            # Update accumulated plastic strain
+            eps_pl_new = eps_pl_old_
+    else:
+        # Plastic multiplier
+        # SOLVE WITH ITERATIVE SOLUTION
+        gamma = conditional(f_trial > 0, 
+                            f_trial / (2 * mu + 2.0/3.0 * H * n_hard * (
+                                alpha_old_)**(n_hard-1)), ufl.zero((gdim, gdim)))
+        
+        # Flow direction
+        n_flow = plastic_flow_direction(sigma_trial)
+        
+        # Update plastic strain
+        deps_p = gamma * n_flow
+        eps_pl_new = eps_pl_old_ + deps_p
+        
+        # Update equivalent plastic strain
+        alpha_new = alpha_old_ + sqrt(2.0/3.0) * gamma 
+        
+        # Update elastic strain
+        eps_el_new = eps_trial - eps_pl_new
+        
+        # Final stress
+        sigma_new = sigma_elastic(eps_el_new)
+    
+    return sigma_new, eps_pl_new, alpha_new
+
+
+
+# def sigma_tang(eps):
+#     N_elas = as_3D_tensor(n_elas)
+
+#     return (
+#         sigma_elastic(eps)
+#         - 3 * mu * (3 * mu / (3 * mu + H) - beta) * ufl.inner(
+#             N_elas, eps) * N_elas - 2 * mu * beta * ufl.dev(eps))
+
+
+def as_3D_tensor(X):
+    """
+    Voigt notation:
+        3D: 11, 22, 33, 23, 13, 12
+        2D: 11, 22, 33, 12
+    """
+
+    if gdim == 3:
+        return ufl.as_tensor([[X[0], X[5], X[4]],
+                              [X[5], X[1], X[3]],
+                              [X[4], X[3], X[2]]])
+    
+    elif gdim == 2:
+        return ufl.as_tensor([[X[0], X[3], 0],
+                              [X[3], X[1], 0],
+                              [0, 0, X[2]]])
+
+def tensor_to_vector(X): 
+    """ 
+    Take a 3x3 tensor and return a vector of size 6/4 in 3D/2D.
+    Voigt notation:
+        3D: 11, 22, 33, 23, 13, 12
+        2D: 11, 22, 33, 12
+    """
+    if gdim == 3:
+        return ufl.as_vector([X[0, 0], X[1, 1], X[2, 2], \
+                              X[1, 2], X[0, 2], X[0, 1]])
+    elif gdim == 2:
+        return ufl.as_vector([X[0, 0], X[1, 1], X[2, 2], X[0, 1]])
+
 
 #%% ------------------------------- Weak forms --------------------------------
 # Linear functional: body forces (assumed zero)
@@ -204,19 +373,20 @@ f_body = fem.Constant(domain, np.zeros(gdim))
 l_form = ufl.dot(f_body, v_test) * dx 
 
 # Bilinear functional
+# Residual F(u; v) = inner(sigma(u), epsilon(v))*dx - L(v)
 # 'u' is the fem.Function representing the current solution candidate
-a_form = ufl.inner(pk_1, grad(v_test)) * dx 
+a_form = ufl.inner(sigma(u, eps_p_old, alpha_old), epsilon(v_test)) * dx 
 
 # Residual
 residual = a_form - l_form
-# or equivalently
-residual = derivative(E_pot, u, v_test)  
 
 # Derivative of the residual with respect to u, in the direction of u_trial
+# J_form = ufl.inner(sigma(u_trial), epsilon(v_test)) * dx
 j_gateaux_der = derivative(residual, u, u_trial)
 
-#%% --------------------------- Initial conditions ----------------------------
 
+
+#%% --------------------------- Initial conditions ----------------------------
 def identity(x):
     """
 
@@ -239,7 +409,6 @@ def identity(x):
         values[3] = 1
 
     return values
-
 
 #%% --------------------------- Boundary Conditions ---------------------------
 
@@ -287,10 +456,10 @@ def apply_displacement_bc(v_space, coords, displacement_values):
     print(f'    dofs: {dofs}, displacement_values: {displacement_values}')
 
     # https://jsdokken.com/dolfinx-tutorial/chapter2/linearelasticity_code.html
-    return fem.dirichletbc(2*displacement_values, dofs, v_space)
+    return fem.dirichletbc(displacement_values, dofs, v_space)
 
 #%% ----------------------- Internal Forces Computation -----------------------
-def compute_forces_by_residual(domain, u, V, bcs):
+def compute_reaction_forces(domain, u, V, bcs):
     """
     Compute reaction forces from the assembled system.
     This method assembles the stiffness matrix and computes R = K*u - f
@@ -298,192 +467,54 @@ def compute_forces_by_residual(domain, u, V, bcs):
     # Alternative 1:
     # Create test and trial functions
     u_test = TestFunction(V)
+    u_trial = TrialFunction(V)
     
     # Bilinear form (stiffness matrix)
-    a_bilinear_form = inner(pk_1, grad(v_test)) * dx 
+    a = ufl.inner(sigma(u_trial), epsilon(u_test)) * dx
     
     # Linear form (load vector - assuming zero body forces)
     f_body = fem.Constant(domain, np.zeros(gdim))
-    l_linear_form = dot(f_body, u_test) * dx
+    L = dot(f_body, u_test) * dx
     
-    residual = a_bilinear_form - l_linear_form
+    # Assemble system
+    A = fem.petsc.assemble_matrix(fem.form(a))#, bcs=bcs)
+    A.assemble()
+    
+    # print(f'Stiffness matrix A: {A.view()}')
 
-    # Assemble the internal force vector
-    f_int_vec = fem.petsc.create_vector(fem.form(residual))
-    fem.petsc.assemble_vector(f_int_vec, fem.form(residual))
+    b = fem.petsc.assemble_vector(fem.form(L))
+    # fem.petsc.apply_lifting(b, [fem.form(a)], [bcs])
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES,
+                  mode=PETSc.ScatterMode.REVERSE)
+    # fem.petsc.set_bc(b, bcs)
+    print(f'b: {b.getArray()}')
     
-    # Update ghost values for parallel computations
-    f_int_vec.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, 
-                          mode=PETSc.ScatterMode.REVERSE)
-    
-    # # Alternative 2: from the definition of residual    
-    # residual_form = fem.form(residual)
-    # f_int_vec = fem.petsc.create_vector(fem.form(residual_form))
-    # # Assemble the residual vector
-    # fem.petsc.assemble_vector(f_int_vec, fem.form(residual_form))
-    # f_int_vec.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, 
-    #                       mode=PETSc.ScatterMode.REVERSE)
-    # # print(f'f_int_vec: {f_int_vec.getArray()}')
+    # Compute reaction forces: f_int = K*u
+    f_int_vec = A.createVecLeft()
+    A.mult(u.x.petsc_vec, f_int_vec)
+    # print(f'f_int_vec_i = A_ij u_j: {f_int_vec.getArray()}')
+    f_int_vec.axpy(-1.0, b)
+    # print(f'f_int_vec_i = A_ij u_j - b_i: {f_int_vec.getArray()}')
+    # print(f'f_int_vec: {f_int_vec.getArray()}')
+    print(f'displacement vector: {u.x.array}')
+
+    # Alternative 2: from the definition of residual    
+    # unconstrained_residual_form = fem.form(residual)
+    # f_int_vec = fem.petsc.create_vector(unconstrained_residual_form)
+    # fem.petsc.assemble_vector(f_int_vec, unconstrained_residual_form)
+    # print(f'f_int_vec: {f_int_vec.getArray()}')
 
     return f_int_vec
 
-def compute_forces_by_stress_integration_ref_config(domain, u, V, gdim):
-    """
-    In the reference configuration, internal forces are computed as:
-
-    f_int = ∫ P : ∇v dV
-    
-    where P is the first Piola-Kirchhoff stress tensor,
-    and v is the test function.
-    """
-    # Test function
-    v_test = TestFunction(V)
-    
-    # Define the internal force as the residual of the weak form
-    # (without external forces since we assume f_body = 0)
-    f_body = fem.Constant(domain, np.zeros(gdim))
-    
-    # Internal forces: f_int = ∫ P : ∇v dV
-    internal_force_form = ufl.inner(pk_1, grad(v_test)) * dx
-    
-    # Assemble the internal force vector
-    f_int_vec = fem.petsc.create_vector(fem.form(internal_force_form))
-    fem.petsc.assemble_vector(f_int_vec, fem.form(internal_force_form))
-    
-    # Update ghost values for parallel computations
-    f_int_vec.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, 
-                         mode=PETSc.ScatterMode.REVERSE)
-    
-    return f_int_vec
-
-def compute_forces_by_stress_integration_current_config(domain, u, V, gdim):
-    """
-    Compute internal forces using Cauchy stress in current configuration.
-    
-    For this approach, we need to transform the integral to the 
-    current configuration:
-
-    f_int = ∫ σ : ∇v dv = ∫ J σ F^(-T) : ∇v dV ,
-    
-    where σ is the Cauchy stress, v is the current volume,
-    and V is the reference volume.
-    """
-
-    # Deformation gradient
-    F_def = ufl.variable(Id + ufl.grad(u))
-
-    # Invariants
-    J_det = ufl.det(F_def)
-
-    # Cauchy stress: σ = (1/J) P F^T
-    sigma_cauchy = (1/J_det) * pk_1 * F_def.T
-    
-    # Create test function
-    v_test = ufl.TestFunction(V)
-    
-    # Transform to reference configuration: ∫ J σ F^(-T) : ∇v dV
-    # This is equivalent to ∫ P : ∇v dV (which is what we use above)
-    F_inv_T = ufl.inv(F_def).T
-    internal_force_form = ufl.inner(J_det * sigma_cauchy * F_inv_T, 
-                                    ufl.grad(v_test)) * ufl.dx
-    
-    # Assemble the internal force vector
-    f_int_vec = fem.petsc.create_vector(fem.form(internal_force_form))
-    fem.petsc.assemble_vector(f_int_vec, fem.form(internal_force_form))
-    
-    # Update ghost values for parallel computations
-    f_int_vec.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, 
-                         mode=PETSc.ScatterMode.REVERSE)
-    
-    return f_int_vec
-
-def compute_stress_measures_at_points(domain, u, V, gdim, points=None):
-    """
-    Compute various stress measures at specific points in the domain.
-    """
-    # Identity tensor
-    Id = ufl.Identity(gdim)
-    
-    # Deformation gradient
-    F_def = Id + ufl.grad(u)
-    
-    # Right Cauchy-Green tensor
-    C = F_def.T * F_def
-    
-    # Invariants
-    J_det = ufl.det(F_def)
-    
-    # Cauchy stress
-    sigma_cauchy = (1/J_det) * pk_1 * F_def.T  
-    
-    # Tensor function spaces for stress projection
-    tensor_element = ufl.TensorElement("Lagrange", domain.ufl_cell(),
-                                       1, shape=(gdim,gdim))
-    
-    V_tensor = fem.FunctionSpace(domain, tensor_element)
-    
-    # Project stresses to nodes
-    pk1_proj = fem.Function(V_tensor, name="PK1_stress")
-    sigma_proj = fem.Function(V_tensor, name="Cauchy_stress")
-    
-    # Projection using Expression class
-    pk1_expr = fem.Expression(pk_1, V_tensor.element.interpolation_points())
-    sigma_expr = fem.Expression(sigma_cauchy,
-                                V_tensor.element.interpolation_points())
-    
-    pk1_proj.interpolate(pk1_expr)
-    sigma_proj.interpolate(sigma_expr)
-    
-    return pk1_proj, sigma_proj
-
-def validate_stress_integration_methods(domain, u, V, gdim):
-    """
-    Compare different methods for computing internal forces.
-    This helps validate that the stress integration is working correctly.
-    """
-    print("Validating stress integration methods...")
-    
-    # Method 1: Using your existing residual approach
-    force_vec_residual = compute_forces_by_residual(domain, u, V, [])
-    
-    # Method 2: Direct stress integration (PK1)
-    force_vec_pk1 = compute_forces_by_stress_integration_ref_config(
-        domain, u, V, gdim)
-    
-    # Method 3: Cauchy stress approach
-    force_vec_cauchy = compute_forces_by_stress_integration_current_config(
-        domain, u, V, gdim)
-    
-    # Compare results
-    residual_array = force_vec_residual.getArray()
-    pk1_array = force_vec_pk1.getArray()
-    cauchy_array = force_vec_cauchy.getArray()
-    
-    # Compute differences
-    diff_pk1_residual = np.linalg.norm(pk1_array - residual_array)
-    diff_cauchy_residual = np.linalg.norm(cauchy_array - residual_array)
-    diff_pk1_cauchy = np.linalg.norm(pk1_array - cauchy_array)
-    
-    print(f"  ||F_PK1 - F_residual|| = {diff_pk1_residual:.3e}")
-    print(f"  ||F_Cauchy - F_residual|| = {diff_cauchy_residual:.3e}")
-    print(f"  ||F_PK1 - F_Cauchy|| = {diff_pk1_cauchy:.3e}")
-    
-    # Clean up
-    force_vec_residual.destroy()
-    force_vec_pk1.destroy()
-    force_vec_cauchy.destroy()
-    
-    return diff_pk1_residual < 1e-10
-
-def extract_nodal_forces(force_vec, boundary_node_coords, V):
+def extract_nodal_reaction_forces(reaction_vec, boundary_node_coords, V):
     """
     Extract reaction forces at specific boundary nodes from the global
       reaction vector.
     """
-    force_output = {}
+    reaction_forces = {}
     
-    # Convert to a numpy array
-    force_array = force_vec.getArray()
+    # Get reaction vector as numpy array
+    reaction_array = reaction_vec.getArray()
 
     # print(f'np.shape(reaction_array): {np.shape(reaction_array)}')
 
@@ -498,35 +529,35 @@ def extract_nodal_forces(force_vec, boundary_node_coords, V):
         # Extract reaction forces at these DOFs
         node_reactions = []
         for dof in dofs:
-            if dof <= len(force_array):
+            if dof <= len(reaction_array):
                 if gdim == 3:
                     # x component
-                    node_reactions.append(force_array[3*dof])
+                    node_reactions.append(reaction_array[3*dof])
                     # y component
-                    node_reactions.append(force_array[3*dof+1] )
+                    node_reactions.append(reaction_array[3*dof+1] )
                     # z component
-                    node_reactions.append(force_array[3*dof+2] )
+                    node_reactions.append(reaction_array[3*dof+2] )
                 elif gdim == 2:
                     # x component
-                    node_reactions.append(force_array[2*dof])
+                    node_reactions.append(reaction_array[2*dof])
                     # y component
-                    node_reactions.append(force_array[2*dof+1] )
+                    node_reactions.append(reaction_array[2*dof+1] )
 
         
         # For 2D, we expect 2 components (x and y)
         # if len(node_reactions) >= 2:
         if gdim == 3:
-            force_output[dofs[0]] = np.array(
+            reaction_forces[dofs[0]] = np.array(
                 [node_reactions[0], node_reactions[1], node_reactions[2]])
         elif gdim == 2:
-            force_output[dofs[0]] = np.array(
+            reaction_forces[dofs[0]] = np.array(
                 [node_reactions[0], node_reactions[1]])
         # elif len(node_reactions) == 1:
-        #     force_output[node_label] = np.array([node_reactions[0], 0.0])
+        #     reaction_forces[node_label] = np.array([node_reactions[0], 0.0])
         # else:
-        #     force_output[node_label] = np.array([0.0, 0.0])
+        #     reaction_forces[node_label] = np.array([0.0, 0.0])
     
-    return force_output
+    return reaction_forces
 
 #%% --------------------------------- Solver ----------------------------------
 
@@ -535,20 +566,20 @@ problem = NonlinearProblem(F=residual, u=u, bcs=bcs,
 
 solver = NewtonSolver(MPI.COMM_WORLD, problem)
 solver.convergence_criterion = "incremental"
-solver.rtol = 1e-4
-solver.atol = 1e-4
+solver.rtol = 1e-8
+solver.atol = 1e-8
 solver.max_it = 50
 solver.report = True
 
 #  The Krylov solver parameters.
-# ksp = solver.krylov_solver
-# opts = PETSc.Options()
-# option_prefix = ksp.getOptionsPrefix()
-# opts[f"{option_prefix}ksp_type"] = "preonly" 
-# opts[f"{option_prefix}pc_type"] = "lu"
-# # opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
-# # opts[f"{option_prefix}ksp_max_it"] = 30
-# ksp.setFromOptions()
+ksp = solver.krylov_solver
+opts = PETSc.Options()
+option_prefix = ksp.getOptionsPrefix()
+opts[f"{option_prefix}ksp_type"] = "preonly" 
+opts[f"{option_prefix}pc_type"] = "lu"
+# opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
+# opts[f"{option_prefix}ksp_max_it"] = 30
+ksp.setFromOptions()
 
 #%%  -------------------------------- Solution --------------------------------
 
@@ -632,55 +663,62 @@ for idx_inc in range(num_increments):
         print(f'   Error at increment {idx_inc+1}: {exc}.')
         break
 
-    # ---------------------------- Internal forces ----------------------------
-    print('Computing internal forces...')
+    # -------------------------- Reaction forces --------------------------
+    print('Computing reaction forces...')
+
+    # ABAQUS interior displacements
+    u.x.array[3*2] = 0.0286878
+    u.x.array[3*2 + 1] = 0.0428083
+
+    u.x.array[5*2] = 0.0201981        
+    u.x.array[5*2 + 1] = 0.0237266
+
+    u.x.array[7*2] = 0.0287869
+    u.x.array[7*2 + 1] = 0.0371176
+
+    u.x.array[10*2] = 0.0151731         
+    u.x.array[10*2 + 1] = 0.024637
 
     # Compute the reaction forces
-    force_vec = compute_forces_by_stress_integration_current_config(
-        domain, u, V, gdim)
-    # force_vec = compute_forces_by_stress_integration_ref_config(
-    #     domain, u, V, gdim)
-    # force_vec = compute_forces_by_residual(domain, u, V, bcs)
-
-    is_valid = validate_stress_integration_methods(domain, u, V, gdim)
-    print(f"Stress integration validation: {'PASSED' if is_valid else 'FAILED'}")
-
-    nodal_forces = extract_nodal_forces(force_vec, boundary_node_coords, V)
+    reaction_vec = compute_reaction_forces(domain, u, V, bcs)
+    nodal_reactions = extract_nodal_reaction_forces(reaction_vec, 
+                                                    boundary_node_coords, V)
     # Store reaction forces for this increment
-    forces_internal[idx_inc] = nodal_forces
+    forces_internal[idx_inc] = nodal_reactions
     
     # Print reaction forces
     # total_reaction = np.array([0.0, 0.0])
-    for node_label, f_int in nodal_forces.items():
+    for node_label, reaction in nodal_reactions.items():
         if gdim == 3:
-            print(f'    Node {node_label}: Rx = {f_int[0]:.3e}, ' + \
-                    f'Ry = {f_int[1]:.3e}, Rz = {f_int[2]:.3e}, ')
+            print(f'    Node {node_label}: Rx = {reaction[0]:.3e}, ' + \
+                    f'Ry = {reaction[1]:.3e}, Rz = {reaction[2]:.3e}, ')
         elif gdim == 2:
-            print(f'    Node {node_label}: Rx = {f_int[0]:.3e}, ' + \
-                    f'Ry = {f_int[1]:.3e}')
+            print(f'    Node {node_label}: Rx = {reaction[0]:.3e}, ' + \
+                    f'Ry = {reaction[1]:.3e}')
         # total_reaction += reaction
     
     # print(f'    Total reaction force: Rx = {total_reaction[0]:.3e}, ' + \
     #       f'Ry = {total_reaction[1]:.3e}')
 
+
     # --------------------------- Save solution ---------------------------
         with io.XDMFFile(
             domain.comm,
-            f"{output_dir}/hyperelasticit_neohooke_displacement_increment_{idx_inc+1:03d}.xdmf", "w"
+            f"{output_dir}/displacement_increment_{idx_inc+1:03d}.xdmf", "w"
             ) as xdmf:
 
             xdmf.write_mesh(domain)
             xdmf.write_function(u)
 
     # Clean up PETSc vector
-    force_vec.destroy()
+    reaction_vec.destroy()
 
 print('------------- incremental displacement loading complete --------------')
 
 
 
 #%% ------------------------------- Output file -------------------------------
-out_file = f"{output_dir}/hyperelasticit_neohooke_.xdmf"
+out_file = f"{output_dir}/linear_elasticity.xdmf"
 
 u_out = fem.Function(V, name='u')
 u_out.interpolate(u)
