@@ -141,10 +141,8 @@ mesh_degree = domain.geometry.cmap.degree
 # 3D 
 # Topological dimension (3 for a cube)
 tdim = domain.topology.dim 
-# print(f'Topological dimension: {tdim}')
 # Geometrical dimension (3 for 3D space)
 gdim = domain.geometry.dim
-# print(f'Geometrical dimension: {gdim}')
 
 # Define the volume integration measure "dx" 
 # and the no. of volume quadrature points.
@@ -259,29 +257,6 @@ residual = a_form - l_form
 # J_form = ufl.inner(sigma(u_trial), epsilon(v_test)) * dx
 j_gateaux_der = derivative(residual, u, u_trial)
 
-#%% --------------------------- Auxiliary matrices ----------------------------
-def identity(x):
-    """
-    A function for constructing the identity matrix.
-    To use the interpolate() feature, this must be defined as a function of x.
-    
-    In 3D:
-        values: dim 1x9 [1, 0, 0, 0, 1, 0, 0, 0, 1]
-    In 2D:
-        values: dim 1x4 [1, 0, 0, 1]
-    """
-    values = np.zeros((domain.geometry.dim*domain.geometry.dim,
-                      x.shape[1]), dtype=np.float64)
-    if gdim == 3:
-        values[0] = 1
-        values[4] = 1
-        values[8] = 1
-    elif gdim == 2:
-        values[0] = 1
-        values[3] = 1
-
-    return values
-
 #%% --------------------------- Boundary Conditions ---------------------------
 
 
@@ -298,9 +273,6 @@ assert num_bd_nodes_mat_patch == num_bd_nodes_fe_space, f'Different no. ' + \
     f'of boundary nodes in material patch ({num_bd_nodes_mat_patch}) and ' + \
         f'solver ({num_bd_nodes_fe_space})'
 
-
-print(f"Number of boundary DOFs: {len(boundary_nodes)}")
-print("Boundary DOF coordinates:")
 node_coords_fe_space = V.tabulate_dof_coordinates()
 bd_node_coords_fe_space = {}
 for node in boundary_nodes:
@@ -322,16 +294,6 @@ bd_node_coords_matpatch = {}
 for node_label in patch['mesh_boundary_nodes_disps'].keys():
     bd_node_coords_matpatch[node_label] = patch['mesh_nodes_coords_ref'][
         node_label]
-print(f'boundary_node_coords: {bd_node_coords_matpatch}')
-
-# for node_label, displacements in patch['mesh_boundary_nodes_disps'].items():
-#     # print(f"  Node {node_label}, displacement = {displacements}")
-#     node_coords = patch['mesh_nodes_coords_ref'][node_label]
-#     # print(f'Node coords: {node_coords}')
-
-
-
-
 
 # # TODO: CHECK THIS - geometrical vs topological
 # boundary_facets = mesh.exterior_facet_indices(domain.topology)
@@ -365,19 +327,6 @@ simulation_data = {
     'boundary_nodes_disps_time_series': {},
     'boundary_nodes_forces_time_series': {}
 }
-
-# Initialize boundary node coordinates from material patch file
-# for node_label in patch['mesh_boundary_nodes_disps'].keys():
-#     node_coords = patch['mesh_nodes_coords_ref'][node_label]
-#     if isinstance(node_coords, np.ndarray):
-#         simulation_data['boundary_nodes_coords'][int(node_label)] = node_coords.tolist() 
-#     else:
-#         simulation_data['boundary_nodes_coords'][int(node_label)] = node_coords
-    
-#     # Initialize time series arrays for displacements and forces
-#     # simulation_data['boundary_nodes_disps_time_series'][int(node_label)] = []
-#     # simulation_data['boundary_nodes_forces_time_series'][node_label] = []
-
 
 # Initialize boundary node coordinates from fe_space coordinates
 for node_idx in boundary_nodes:
@@ -486,12 +435,6 @@ for idx_inc in range(num_increments):
             u, boundary_nodes, V, gdim)
         
         for node_label, disp in boundary_displacements.items():
-
-            # if node_label not in simulation_data[
-            #     'boundary_nodes_disps_time_series']:
-            #     simulation_data['boundary_nodes_disps_time_series'][
-            #         node_label] = []
-
             simulation_data['boundary_nodes_disps_time_series'][
                 node_label].append(disp.tolist())
 
@@ -541,21 +484,7 @@ for idx_inc in range(num_increments):
                                          gdim, V)
 
     # Store force data  
-    for node_label, force in nodal_forces.items():
-        if gdim == 3:
-            print(f'    Node {node_label}: Rx = {force[0]:.3e}, ' + \
-                    f'Ry = {force[1]:.3e}, Rz = {force[2]:.3e}, ')
-        elif gdim == 2:
-            print(f'    Node {node_label}: Rx = {force[0]:.3e}, ' + \
-                    f'Ry = {force[1]:.3e}')
-        
-        # if node_label not in simulation_data[
-        #     'boundary_nodes_forces_time_series']:
-        #     simulation_data['boundary_nodes_forces_time_series'][
-        #         node_label] = []
-        # simulation_data['boundary_nodes_forces_time_series'][
-        #     node_label].append(force.tolist())
-        
+    for node_label, force in nodal_forces.items():                    
         simulation_data['boundary_nodes_forces_time_series'][
             node_label].append(force.tolist())
 
@@ -587,12 +516,16 @@ print('------------- incremental displacement loading complete --------------')
 #%% ------------------------------- Save Data -------------------------------
 
 # Convert forces time series lists to NumPy arrays
-for node_label, forces_list in simulation_data['boundary_nodes_forces_time_series'].items():
-    simulation_data['boundary_nodes_forces_time_series'][node_label] = np.array(forces_list)
+for node_label, forces_list in simulation_data[
+    'boundary_nodes_forces_time_series'].items():
+    simulation_data['boundary_nodes_forces_time_series'][
+        node_label] = np.array(forces_list)
 
 # Convert displacements time series lists to NumPy arrays
-for node_label, disps_list in simulation_data['boundary_nodes_disps_time_series'].items():
-    simulation_data['boundary_nodes_disps_time_series'][node_label] = np.array(disps_list)
+for node_label, disps_list in simulation_data[
+    'boundary_nodes_disps_time_series'].items():
+    simulation_data['boundary_nodes_disps_time_series'][
+        node_label] = np.array(disps_list)
 
 
 # Save the complete simulation data to a pickle file
